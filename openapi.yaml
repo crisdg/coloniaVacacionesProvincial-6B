@@ -1,0 +1,687 @@
+openapi: "3.0.3"
+info:
+  title: "Colonia de Vacaciones Provincial"
+  version: "0.3.0"
+  description: "Contrato del caso de uso y esqueleto de infraestructura (avance del 22/10). Incluye inscripción por el tutor, consulta por tutor y administrador, y corrección y cancelación administrativa con motivo. Solo GET /health está implementado. Los endpoints de negocio responden 501; sus respuestas de éxito documentan el comportamiento futuro. Sin autenticación ni autorización en esta etapa. Login OIDC, RBAC y respuestas 401/403 se incorporarán después. Cola preparada pero aún sin productor ni consumidor. La validación de residencia contra un padrón simulado es obligatoria para la entrega funcional y está pendiente de implementación. Reservas provisionales por correcciones, revisión de 48 horas y prórrogas quedan fuera del alcance."
+servers:
+  -
+    url: "/api"
+    description: "API a través del proxy del frontend o de Swagger UI; usa el host y puerto del navegador."
+tags:
+  -
+    name: "Turnos"
+    description: "Consulta y gestión de turnos, cupos y fechas."
+  -
+    name: "Inscripciones"
+    description: "Registro, validación de residencia, consulta y gestión de inscripciones. Flujo funcional pendiente de implementación."
+  -
+    name: "Infraestructura"
+    description: "Disponibilidad del sistema."
+paths:
+  "/health":
+    get:
+      tags:
+        - "Infraestructura"
+      operationId: "obtenerSalud"
+      summary: "Comprobar API y conexión a PostgreSQL"
+      description: "Implementado. No comprueba la cola, que no participa todavía del flujo."
+      responses:
+        "200":
+          description: "API y base disponibles."
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Health"
+        "503":
+          "$ref": "#/components/responses/NoDisponible"
+  "/turnos":
+    get:
+      tags:
+        - "Turnos"
+      operationId: "listarTurnos"
+      summary: "Listar turnos"
+      description: "Uso previsto: tutor y administrador de colonia. Actualmente devuelve 501."
+      responses:
+        "200":
+          description: "Turnos registrados."
+          content:
+            "application/json":
+              schema:
+                type: "array"
+                items:
+                  "$ref": "#/components/schemas/Turno"
+        "500":
+          "$ref": "#/components/responses/ErrorInterno"
+        "501":
+          "$ref": "#/components/responses/Pendiente"
+    post:
+      tags:
+        - "Turnos"
+      operationId: "crearTurno"
+      summary: "Crear un turno"
+      description: "Uso previsto: administrador de colonia. No se aplican permisos todavía. Actualmente devuelve 501."
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/TurnoNuevo"
+      responses:
+        "201":
+          description: "Recurso creado. Comportamiento previsto para la implementación funcional."
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Turno"
+          headers:
+            Location:
+              description: "URI relativa del recurso creado, resuelta respecto a la URL de la solicitud; conserva el prefijo del proxy."
+              schema:
+                type: "string"
+              example: "turnos/1"
+        "400":
+          "$ref": "#/components/responses/Invalido"
+        "500":
+          "$ref": "#/components/responses/ErrorInterno"
+        "501":
+          "$ref": "#/components/responses/Pendiente"
+  "/turnos/{id}":
+    parameters:
+      -
+        name: "id"
+        in: "path"
+        required: true
+        description: "Identificador del recurso."
+        schema:
+          type: "integer"
+          minimum: 1
+        example: 1
+    get:
+      tags:
+        - "Turnos"
+      operationId: "obtenerTurno"
+      summary: "Consultar un turno"
+      description: "Uso previsto: tutor y administrador de colonia. Actualmente devuelve 501."
+      responses:
+        "200":
+          description: "Detalle del turno."
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Turno"
+        "400":
+          "$ref": "#/components/responses/Invalido"
+        "404":
+          "$ref": "#/components/responses/NoEncontrado"
+        "500":
+          "$ref": "#/components/responses/ErrorInterno"
+        "501":
+          "$ref": "#/components/responses/Pendiente"
+    patch:
+      tags:
+        - "Turnos"
+      operationId: "actualizarTurno"
+      summary: "Actualizar cupos, fechas o nombre del turno"
+      description: "Uso previsto: administrador de colonia. No invalida inscripciones existentes. El aumento de cupo permite avanzar a las solicitudes elegibles en orden, sin adelantar pendientes de validación del mismo turno. Actualmente devuelve 501."
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/TurnoActualizacion"
+      responses:
+        "200":
+          description: "Turno actualizado, con cantidades recalculadas."
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Turno"
+        "400":
+          "$ref": "#/components/responses/Invalido"
+        "404":
+          "$ref": "#/components/responses/NoEncontrado"
+        "409":
+          "$ref": "#/components/responses/Conflicto"
+        "500":
+          "$ref": "#/components/responses/ErrorInterno"
+        "501":
+          "$ref": "#/components/responses/Pendiente"
+  "/inscripciones":
+    post:
+      tags:
+        - "Inscripciones"
+      operationId: "crearInscripcion"
+      summary: "Inscribir a un chico en un turno"
+      description: "Uso previsto: tutor. Requiere período abierto y edad de 6 a 12 años inclusive al registrar la solicitud (fecha del servidor en America/Argentina/Buenos_Aires). Comprueba una sola inscripción activa por DNI y convocatoria, incluso entre turnos y sedes diferentes. La convocatoria se obtiene del turno. Registra durablemente la solicitud y su orden antes de responder 202 con estado pendiente_de_validacion. La cola procesa la consulta al padrón simulado con límite global de 50 consultas por segundo, incluidos reintentos. Solo confirma residentes de la jurisdicción. No adelanta solicitudes anteriores pendientes del mismo turno. Una nueva solicitud tras cancelación o rechazo recibe nuevo orden. Apertura inclusiva y cierre exclusivo. Actualmente devuelve 501, sin guardar datos."
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/InscripcionNueva"
+      responses:
+        "202":
+          description: "Solicitud recibida y persistida, pendiente de validar residencia; todavía no confirma cupo. Comportamiento futuro."
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - "$ref": "#/components/schemas/Inscripcion"
+                  - type: "object"
+                    properties:
+                      estado:
+                        type: "string"
+                        enum: [pendiente_de_validacion]
+          headers:
+            Location:
+              description: "URI relativa para consultar el estado, resuelta respecto a la URL de la solicitud."
+              schema:
+                type: "string"
+              example: "inscripciones/1"
+        "400":
+          "$ref": "#/components/responses/Invalido"
+        "404":
+          "$ref": "#/components/responses/NoEncontrado"
+        "409":
+          "$ref": "#/components/responses/Conflicto"
+        "500":
+          "$ref": "#/components/responses/ErrorInterno"
+        "501":
+          "$ref": "#/components/responses/Pendiente"
+    get:
+      tags:
+        - "Inscripciones"
+      operationId: "listarInscripciones"
+      summary: "Consultar inscripciones según el rol"
+      description: "Uso previsto: el tutor consulta solo sus propias inscripciones; el administrador puede consultar todas. Identidad y permisos se incorporarán después; no se implementa un listado público provisional. Actualmente devuelve 501."
+      responses:
+        "200":
+          description: "Inscripciones accesibles para el usuario."
+          content:
+            "application/json":
+              schema:
+                type: "array"
+                items:
+                  "$ref": "#/components/schemas/Inscripcion"
+        "400":
+          "$ref": "#/components/responses/Invalido"
+        "500":
+          "$ref": "#/components/responses/ErrorInterno"
+        "501":
+          "$ref": "#/components/responses/Pendiente"
+  "/inscripciones/{id}":
+    parameters:
+      -
+        name: "id"
+        in: "path"
+        required: true
+        description: "Identificador del recurso."
+        schema:
+          type: "integer"
+          minimum: 1
+        example: 1
+    get:
+      tags:
+        - "Inscripciones"
+      operationId: "obtenerInscripcion"
+      summary: "Consultar una inscripción"
+      description: "Uso previsto: tutor propietario o administrador de colonia. La autorización se implementará en la etapa de seguridad; un tutor no podrá consultar inscripciones ajenas. Actualmente devuelve 501."
+      responses:
+        "200":
+          description: "Detalle de inscripción."
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Inscripcion"
+        "400":
+          "$ref": "#/components/responses/Invalido"
+        "404":
+          "$ref": "#/components/responses/NoEncontrado"
+        "500":
+          "$ref": "#/components/responses/ErrorInterno"
+        "501":
+          "$ref": "#/components/responses/Pendiente"
+    patch:
+      tags: [Inscripciones]
+      operationId: "corregirInscripcion"
+      summary: "Corregir datos de una inscripción"
+      description: "Uso previsto: administrador. Corrige datos del mismo chico sin cambiar turno, convocatoria, estado ni orden de recepción. Vuelve a comprobar duplicados por DNI y convocatoria y edad a la fecha original de inscripción; si cambia el DNI, requiere validar residencia antes de aceptar el cambio. No permite sustituir al chico ni corregir inscripciones canceladas o rechazadas. Actualmente devuelve 501."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/InscripcionCorreccion"
+            example:
+              chico:
+                apellido: "Gómez"
+      responses:
+        "200":
+          description: "Inscripción corregida; conserva estado y orden original."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Inscripcion"
+        "400":
+          "$ref": "#/components/responses/Invalido"
+        "404":
+          "$ref": "#/components/responses/NoEncontrado"
+        "409":
+          "$ref": "#/components/responses/Conflicto"
+        "500":
+          "$ref": "#/components/responses/ErrorInterno"
+        "501":
+          "$ref": "#/components/responses/Pendiente"
+  "/inscripciones/{id}/cancelaciones":
+    parameters:
+      - name: "id"
+        in: "path"
+        required: true
+        description: "Identificador de la inscripción a cancelar."
+        schema:
+          type: "integer"
+          minimum: 1
+        example: 1
+    post:
+      tags: [Inscripciones]
+      operationId: "cancelarInscripcion"
+      summary: "Cancelar una inscripción con motivo"
+      description: "Uso previsto: administrador. Cancela con motivo obligatorio. Puede cancelar una solicitud pendiente, confirmada o en espera. Si estaba confirmada, libera la plaza; la asignación continúa en orden sin adelantar pendientes de validación. Cancelar una pendiente o en espera no libera una plaza ocupada. Una inscripción cancelada o rechazada devuelve 409. Actualmente devuelve 501."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/CancelacionNueva"
+            example:
+              motivo: "Solicitud de baja del tutor."
+      responses:
+        "200":
+          description: "Inscripción actualizada a cancelada, con su motivo."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Inscripcion"
+        "400":
+          "$ref": "#/components/responses/Invalido"
+        "404":
+          "$ref": "#/components/responses/NoEncontrado"
+        "409":
+          "$ref": "#/components/responses/Conflicto"
+        "500":
+          "$ref": "#/components/responses/ErrorInterno"
+        "501":
+          "$ref": "#/components/responses/Pendiente"
+components:
+  schemas:
+    TurnoNuevo:
+      type: "object"
+      additionalProperties: false
+      required:
+        - "convocatoriaId"
+        - "sedeId"
+        - "nombre"
+        - "fechaInicio"
+        - "fechaFin"
+        - "inscripcionAbreEn"
+        - "inscripcionCierraEn"
+        - "cupoTotal"
+      properties:
+        convocatoriaId:
+          type: "string"
+          minLength: 1
+          example: "verano-2027"
+          description: "Identifica la convocatoria provincial, compartida por todos sus turnos y sedes."
+        sedeId:
+          type: "integer"
+          minimum: 1
+          example: 1
+          description: "Sede del catálogo precargado. No implica un módulo ni un CRUD adicional."
+        nombre:
+          type: "string"
+          minLength: 1
+          example: "Turno mañana - Enero"
+        fechaInicio:
+          type: "string"
+          format: "date"
+          example: "2027-01-04"
+        fechaFin:
+          type: "string"
+          format: "date"
+          example: "2027-01-29"
+        inscripcionAbreEn:
+          type: "string"
+          format: "date-time"
+          description: "Fecha y hora con zona horaria explícita."
+          example: "2026-12-01T09:00:00-03:00"
+        inscripcionCierraEn:
+          type: "string"
+          format: "date-time"
+          description: "Fecha y hora con zona horaria explícita."
+          example: "2026-12-20T18:00:00-03:00"
+        cupoTotal:
+          type: "integer"
+          minimum: 0
+          example: 30
+      description: "Inicio de actividad no posterior al fin. Apertura de inscripción anterior al cierre y cierre no posterior al inicio de actividad."
+    TurnoActualizacion:
+      type: "object"
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        nombre:
+          type: "string"
+          minLength: 1
+          example: "Turno mañana - Enero"
+        fechaInicio:
+          type: "string"
+          format: "date"
+          example: "2027-01-04"
+        fechaFin:
+          type: "string"
+          format: "date"
+          example: "2027-01-29"
+        inscripcionAbreEn:
+          type: "string"
+          format: "date-time"
+          description: "Fecha y hora con zona horaria explícita."
+          example: "2026-12-01T09:00:00-03:00"
+        inscripcionCierraEn:
+          type: "string"
+          format: "date-time"
+          description: "Fecha y hora con zona horaria explícita."
+          example: "2026-12-20T18:00:00-03:00"
+        cupoTotal:
+          type: "integer"
+          minimum: 0
+          example: 30
+      description: "Actualización parcial. Validar las fechas combinando valores actuales y nuevos. El cupo no puede ser inferior a las inscripciones confirmadas. Un aumento permite avanzar en orden sin adelantar solicitudes pendientes de validación del mismo turno. Sede y convocatoria no se modifican."
+    Turno:
+      type: "object"
+      required:
+        - "id"
+        - "convocatoriaId"
+        - "sedeId"
+        - "nombre"
+        - "fechaInicio"
+        - "fechaFin"
+        - "inscripcionAbreEn"
+        - "inscripcionCierraEn"
+        - "cupoTotal"
+        - "confirmados"
+        - "disponibles"
+        - "enEspera"
+      properties:
+        convocatoriaId:
+          type: "string"
+          minLength: 1
+          example: "verano-2027"
+          description: "Identifica la convocatoria provincial, compartida por todos sus turnos y sedes."
+        sedeId:
+          type: "integer"
+          minimum: 1
+          example: 1
+          description: "Sede del catálogo precargado. No implica un módulo ni un CRUD adicional."
+        id:
+          type: "integer"
+          minimum: 1
+        nombre:
+          type: "string"
+          minLength: 1
+          example: "Turno mañana - Enero"
+        fechaInicio:
+          type: "string"
+          format: "date"
+          example: "2027-01-04"
+        fechaFin:
+          type: "string"
+          format: "date"
+          example: "2027-01-29"
+        inscripcionAbreEn:
+          type: "string"
+          format: "date-time"
+          description: "Fecha y hora con zona horaria explícita."
+          example: "2026-12-01T09:00:00-03:00"
+        inscripcionCierraEn:
+          type: "string"
+          format: "date-time"
+          description: "Fecha y hora con zona horaria explícita."
+          example: "2026-12-20T18:00:00-03:00"
+        cupoTotal:
+          type: "integer"
+          minimum: 0
+          example: 30
+        confirmados:
+          type: "integer"
+          minimum: 0
+        disponibles:
+          type: "integer"
+          minimum: 0
+          description: "Cupo total menos confirmados. Valor informativo, no reserva una plaza."
+        enEspera:
+          type: "integer"
+          minimum: 0
+    Chico:
+      type: "object"
+      additionalProperties: false
+      required:
+        - "documento"
+        - "nombre"
+        - "apellido"
+        - "fechaNacimiento"
+      properties:
+        documento:
+          type: "string"
+          pattern: "^[0-9]{7,8}$"
+          example: "55123456"
+          description: "DNI argentino, sin puntos. Identifica al chico para comprobar unicidad de inscripción activa en toda la convocatoria."
+        nombre:
+          type: "string"
+          minLength: 1
+          example: "Sofía"
+        apellido:
+          type: "string"
+          minLength: 1
+          example: "Gómez"
+        fechaNacimiento:
+          type: "string"
+          format: "date"
+          example: "2017-05-10"
+          description: "Debe tener entre 6 y 12 años cumplidos al registrar la inscripción, no al inicio del turno. Se calcula con la fecha del servidor en America/Argentina/Buenos_Aires; no se recibe una edad declarada."
+    InscripcionNueva:
+      type: "object"
+      additionalProperties: false
+      required:
+        - "turnoId"
+        - "chico"
+      properties:
+        turnoId:
+          type: "integer"
+          minimum: 1
+          example: 1
+        chico:
+          "$ref": "#/components/schemas/Chico"
+      description: "La convocatoria y sede se derivan del turno elegido; no se reciben de nuevo en esta solicitud. No recibe tutorId arbitrario. La vinculación con el tutor se completará en la etapa OIDC. Esta etapa no crea inscripciones: responde 501."
+    Inscripcion:
+      type: "object"
+      required:
+        - "id"
+        - "turnoId"
+        - "chico"
+        - "estado"
+        - "ordenRecepcion"
+        - "creadoEn"
+      properties:
+        id:
+          type: "integer"
+          minimum: 1
+        turnoId:
+          type: "integer"
+          minimum: 1
+        chico:
+          "$ref": "#/components/schemas/Chico"
+        estado:
+          "$ref": "#/components/schemas/EstadoInscripcion"
+        ordenRecepcion:
+          type: "integer"
+          minimum: 1
+          description: "Orden inmutable de recepción durable en el servidor, asignado antes de consultar el padrón. Se usa para asignar plazas dentro del turno sin adelantar solicitudes anteriores pendientes. No es la posición actual en espera."
+        creadoEn:
+          type: "string"
+          format: "date-time"
+          description: "Fecha y hora con zona horaria explícita."
+        motivoRechazo:
+          type: "string"
+          description: "Presente en rechazada, por ejemplo residencia fuera de la jurisdicción."
+        motivoCancelacion:
+          type: "string"
+          description: "Presente cuando la inscripción está cancelada."
+    EstadoInscripcion:
+      type: "string"
+      enum: [pendiente_de_validacion, confirmada, en_lista_de_espera, rechazada, cancelada]
+      description: "Activas: pendiente_de_validacion, confirmada y en_lista_de_espera. Rechazada y cancelada son finales y no bloquean una nueva solicitud. Una falla técnica del padrón mantiene pendiente_de_validacion; no equivale a rechazo."
+    InscripcionCorreccion:
+      type: "object"
+      additionalProperties: false
+      required: [chico]
+      properties:
+        chico:
+          type: "object"
+          additionalProperties: false
+          minProperties: 1
+          properties:
+            documento:
+              "$ref": "#/components/schemas/Chico/properties/documento"
+            nombre:
+              "$ref": "#/components/schemas/Chico/properties/nombre"
+            apellido:
+              "$ref": "#/components/schemas/Chico/properties/apellido"
+            fechaNacimiento:
+              "$ref": "#/components/schemas/Chico/properties/fechaNacimiento"
+    CancelacionNueva:
+      type: "object"
+      additionalProperties: false
+      required: [motivo]
+      properties:
+        motivo:
+          type: "string"
+          minLength: 1
+          pattern: '\S'
+          description: "Motivo obligatorio; no puede contener únicamente espacios."
+    Health:
+      type: "object"
+      required:
+        - "status"
+        - "database"
+        - "stage"
+      properties:
+        status:
+          type: "string"
+          enum:
+            - "ok"
+        database:
+          type: "string"
+          enum:
+            - "ok"
+        stage:
+          type: "string"
+          enum:
+            - "esqueleto"
+    ProblemDetails:
+      type: "object"
+      required:
+        - "type"
+        - "title"
+        - "status"
+        - "detail"
+        - "instance"
+      properties:
+        type:
+          type: "string"
+          format: "uri"
+          example: "about:blank"
+        title:
+          type: "string"
+        status:
+          type: "integer"
+          minimum: 400
+          maximum: 599
+        detail:
+          type: "string"
+        instance:
+          type: "string"
+          description: "Ruta solicitada vista por la API, sin el prefijo /api del proxy."
+          example: "/turnos"
+  responses:
+    Invalido:
+      description: "Datos, fechas o JSON inválidos, incluida edad fuera de 6 a 12 años al inscribirse."
+      content:
+        "application/problem+json":
+          schema:
+            "$ref": "#/components/schemas/ProblemDetails"
+          example:
+            type: "about:blank"
+            title: "Datos inválidos"
+            status: 400
+            detail: "Datos, fechas o JSON inválidos, incluida edad fuera de 6 a 12 años al inscribirse."
+            instance: "/turnos"
+    NoEncontrado:
+      description: "El recurso no existe."
+      content:
+        "application/problem+json":
+          schema:
+            "$ref": "#/components/schemas/ProblemDetails"
+          example:
+            type: "about:blank"
+            title: "No encontrado"
+            status: 404
+            detail: "El recurso no existe."
+            instance: "/turnos"
+    Conflicto:
+      description: "Ya existe una inscripción activa del chico en la convocatoria, inscripción en estado final, período cerrado o cupo inferior a los confirmados. La falta de cupo genera lista de espera, no conflicto."
+      content:
+        "application/problem+json":
+          schema:
+            "$ref": "#/components/schemas/ProblemDetails"
+          example:
+            type: "about:blank"
+            title: "Conflicto"
+            status: 409
+            detail: "Ya existe una inscripción activa del chico en la convocatoria, inscripción en estado final, período cerrado o cupo inferior a los confirmados. La falta de cupo genera lista de espera, no conflicto."
+            instance: "/turnos"
+    ErrorInterno:
+      description: "Error inesperado."
+      content:
+        "application/problem+json":
+          schema:
+            "$ref": "#/components/schemas/ProblemDetails"
+          example:
+            type: "about:blank"
+            title: "Error interno"
+            status: 500
+            detail: "Error inesperado."
+            instance: "/turnos"
+    Pendiente:
+      description: "Respuesta actual de todas las operaciones de turnos e inscripciones: lógica de negocio aún no implementada."
+      content:
+        "application/problem+json":
+          schema:
+            "$ref": "#/components/schemas/ProblemDetails"
+          example:
+            type: "about:blank"
+            title: "Funcionalidad pendiente"
+            status: 501
+            detail: "Respuesta actual de todas las operaciones de turnos e inscripciones: lógica de negocio aún no implementada."
+            instance: "/turnos"
+    NoDisponible:
+      description: "No se pudo comprobar la conexión con PostgreSQL."
+      content:
+        "application/problem+json":
+          schema:
+            "$ref": "#/components/schemas/ProblemDetails"
+          example:
+            type: "about:blank"
+            title: "Servicio no disponible"
+            status: 503
+            detail: "No se pudo comprobar la conexión con PostgreSQL."
+            instance: "/health"

@@ -1,0 +1,80 @@
+name: colonia-vacaciones
+services:
+  frontend:
+    build: ./frontend
+    environment:
+      API_URL: http://api:3000
+    ports:
+      - "${FRONTEND_PORT:-3001}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [backend]
+  api:
+    build: ./api
+    environment:
+      PORT: 3000
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:?Definir POSTGRES_DB en .env}
+      DB_USER: ${POSTGRES_USER:?Definir POSTGRES_USER en .env}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?Definir POSTGRES_PASSWORD en .env}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks: [backend]
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Definir POSTGRES_DB en .env}
+      POSTGRES_USER: ${POSTGRES_USER:?Definir POSTGRES_USER en .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Definir POSTGRES_PASSWORD en .env}
+    volumes:
+      - colonia_pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [backend]
+  cola:
+    image: rabbitmq:4-alpine
+    hostname: cola
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?Definir RABBITMQ_USER en .env}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?Definir RABBITMQ_PASSWORD en .env}
+    volumes:
+      - colonia_rabbitmq:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "docker-entrypoint.sh", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    networks: [backend]
+  swagger-ui:
+    image: swaggerapi/swagger-ui:v5.17.14
+    environment:
+      SWAGGER_JSON: /spec/openapi.yaml
+    volumes:
+      - ./openapi.yaml:/spec/openapi.yaml:ro
+      - ./swagger/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+    ports:
+      - "${SWAGGER_PORT:-8080}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [backend]
+volumes:
+  colonia_pgdata:
+  colonia_rabbitmq:
+networks:
+  backend:
+
