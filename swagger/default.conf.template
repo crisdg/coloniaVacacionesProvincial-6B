@@ -6,6 +6,9 @@ server {
     location /api/ {
         proxy_pass http://api:3000/;
     }
+    location = /openapi.auth.yaml {
+        add_header Cache-Control "no-store" always;
+    }
     location / {
         try_files $uri $uri/ =404;
     }

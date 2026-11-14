@@ -1,0 +1,68 @@
+# Clase 11 — Arquitectura de Software 1 · ANEXO de seguridad
+# Se SUMA al docker-compose.yml de la Clase 10 sin modificarlo:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.auth.yml up -d --build
+#
+# Compose combina los dos archivos: agrega servicios nuevos (keycloak, gateway)
+# y le cambia algunas cosas a los que ya existían (api, swagger-ui).
+
+services:
+
+  # Proveedor de identidad OIDC. Modo desarrollo: sin HTTPS y con base interna (no usar así en producción).
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.2.5
+    command: ["start-dev", "--import-realm"]          # importa el realm "cursos" la primera vez
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin              # usuario de la consola de administración
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin              # en un proyecto real: .env fuera del repo
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ./auth/keycloak:/opt/keycloak/data/import:ro  # bind mount: el realm versionado en el repo
+    ports:
+      - "8180:8080"                                    # 8080 ya lo usa swagger-ui en el host
+    healthcheck:
+      # La imagen no trae curl: le pegamos al endpoint de salud (puerto 9000) con bash
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks:
+      - identidad
+
+  # Gateway: la ÚNICA puerta de entrada a la API. Valida el token y aplica las reglas por rol.
+  gateway:
+    build: ./auth/gateway
+    environment:
+      PORT: 8000
+      API_URL: http://api:3000                                                     # por la red backend
+      JWKS_URL: http://keycloak:8080/realms/cursos/protocol/openid-connect/certs   # por la red identidad
+      ISSUER: http://localhost:8180/realms/cursos     # el "iss" que pone Keycloak cuando el navegador entra por localhost:8180
+      AUDIENCE: api-cursos
+      CORS_ORIGIN: http://localhost:8080
+    ports:
+      - "8000:8000"
+    depends_on:
+      - api
+      - keycloak       # alcanza con que arranque: las claves se piden recién con el primer token
+    networks:
+      - backend
+      - identidad
+
+  # La API deja de publicar su puerto: desde afuera solo se llega por el gateway.
+  # "!reset" borra la lista de puertos del archivo base (requiere Docker Compose 2.24 o superior).
+  api:
+    ports: !reset []
+
+  # Swagger UI ahora lee el contrato CON seguridad y sabe loguearse contra Keycloak.
+  swagger-ui:
+    environment:
+      SWAGGER_JSON: /spec/openapi.auth.yaml
+      OAUTH_CLIENT_ID: swagger-ui
+      OAUTH_USE_PKCE: "true"
+      OAUTH_SCOPES: openid profile
+    volumes:
+      - ./auth/openapi.auth.yaml:/spec/openapi.auth.yaml:ro
+
+networks:
+  identidad:
