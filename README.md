@@ -4,16 +4,21 @@ Arquitectura de Software 1 · UNAHUR · Escenario 6B
 
 ## Alcance de este avance
 
-Esqueleto correspondiente al avance del **22/10**: servicios del C4 levantados con Compose y contrato OpenAPI del caso de uso.
+Avance del **29/10**: login delegado en Keycloak, con los dos roles del escenario 6B.
 
-La arquitectura es **monolítica**, con un único módulo de negocio: **Inscripciones**. **Turno** es una entidad de ese módulo, que reúne la gestión de inscripciones, turnos y cupos.
+La arquitectura sigue el **ADR-001**: monolito modular, un único módulo de negocio **Inscripciones**. **Turno** es una entidad de ese módulo. Las rutas están en `api/src/modules/inscripciones/`: `routes.js` para `/inscripciones` y `turnos.routes.js` para `/turnos`.
 
-El esqueleto mantiene dos archivos de rutas dentro de `api/src/modules/inscripciones/`: `routes.js` para `/inscripciones` y `turnos.routes.js` para `/turnos`. Separar las rutas por recurso no implica tener módulos distintos. Las entidades y sus reglas se implementarán después; por ahora no hay clases de dominio ni lógica de negocio.
+**Implementado:** infraestructura, `GET /health`, y autenticación OIDC con autorización por rol. La decisión de validar el token solo en el gateway está en [docs/adr/ADR-007-validacion-del-token.md](docs/adr/ADR-007-validacion-del-token.md). Complementa el ADR-003 del escenario (OIDC y RBAC) y no lo reemplaza.
+**Pendiente:** lógica de negocio. Con un token de un rol habilitado, turnos e inscripciones responden **501 Not Implemented**. Las respuestas de éxito del contrato describen el comportamiento futuro.
 
-**Implementado:** infraestructura, pantalla inicial, proxy HTTP, Swagger y `GET /health` con consulta real a PostgreSQL.
-**Pendiente:** lógica de negocio. Todas las rutas de turnos e inscripciones responden **501 Not Implemented**, con Problem Details. Las respuestas de éxito del contrato describen el comportamiento que se implementará después, no una funcionalidad ya disponible.
+Roles, como en el enunciado:
 
-No hay login ni permisos aplicados. Keycloak, OIDC, roles, validación de tokens y respuestas 401/403 se incorporarán en la etapa de seguridad.
+| Usuario | Clave | Rol | Puede | No puede |
+| --- | --- | --- | --- | --- |
+| `ana` | `ana123` | administrador | Gestionar turnos, cupos e inscripciones, y consultar | — |
+| `beto` | `beto123` | tutor | Consultar turnos, solicitar una inscripción y consultar inscripciones | Crear o modificar turnos, corregir o cancelar inscripciones |
+
+Esas claves son las de los usuarios de prueba del realm versionado. La contraseña del admin de Keycloak no está en el repo: va en `.env`. No hay `client_secret`: ningún servicio llama a la API sin un usuario.
 
 ## Levantar el proyecto
 
@@ -25,39 +30,43 @@ Requisito: Docker Desktop funcionando, con Docker Compose.
    Copy-Item .env.example .env
    ```
 
-2. Completar en `.env` las variables `POSTGRES_PASSWORD` y `RABBITMQ_PASSWORD`. No dejar valores vacíos. No sobrescribir un `.env` existente: contiene las credenciales usadas para inicializar los volúmenes.
+2. Completar en `.env` las variables `POSTGRES_PASSWORD`, `RABBITMQ_PASSWORD` y `KC_ADMIN_PASSWORD`. No dejar valores vacíos. No sobrescribir un `.env` existente: contiene las credenciales usadas para inicializar los volúmenes.
 
-3. Construir y levantar:
+3. Construir y levantar el esqueleto junto con el anexo de identidad:
 
    ```powershell
-   docker compose up -d --build
+   docker compose -f docker-compose.yml -f docker-compose.auth.yml up -d --build
    ```
 
 4. Comprobar el arranque:
 
    ```powershell
-   docker compose ps
-   docker compose logs api
+   docker compose -f docker-compose.yml -f docker-compose.auth.yml ps
    ```
 
-   PostgreSQL, API y RabbitMQ deben quedar `healthy`; frontend y Swagger deben estar en ejecución.
+   PostgreSQL, API, RabbitMQ y Keycloak deben quedar `healthy`; frontend, gateway y Swagger deben estar en ejecución.
 
-Accesos con los puertos predeterminados:
+Accesos:
 
-- Frontend inicial: http://localhost:3001
+- Frontend (login): http://localhost:3001
 - Swagger UI: http://localhost:8080
-- Estado vía frontend: http://localhost:3001/api/health
-- Estado vía Swagger: http://localhost:8080/api/health
+- Keycloak: http://localhost:8180 (realm `colonia`)
+- Gateway, única puerta de la API: http://localhost:8000
+- Estado público: http://localhost:3001/api/health
 
-Los puertos del host se configuran con `FRONTEND_PORT` y `SWAGGER_PORT`. El contrato usa `/api` como servidor relativo: cambiar esos puertos no requiere editar OpenAPI.
+El login del frontend exige el redirect exacto `http://localhost:3001/`. El de Swagger exige `http://localhost:8080/oauth2-redirect.html`. Esos puertos no se cambian: están declarados en el realm. En Swagger, Authorize usa el cliente `swagger-ui`, secreto vacío y scopes `openid` y `profile`.
+
+Keycloak importa `auth/keycloak/realm-colonia.json` solo si el volumen `colonia_keycloak` está vacío. Para reimportar el realm hay que borrar ese volumen.
 
 ## Servicios y conexiones
 
-- `frontend`: página inicial que se convertirá en la SPA. Nginx sirve la página y reenvía `/api/` a `http://api:3000/`, configurado por `API_URL`.
-- `api`: Node.js + Express. Un único módulo `inscripciones`, que también contiene las rutas de turnos. Se conecta a `db:5432`. No publica un puerto al host.
+- `frontend`: página de login (Authorization Code + PKCE, cliente público `frontend`). Nginx reenvía `/api/` al gateway.
+- `gateway`: valida firma, `iss`, `aud` y `exp`, aplica el rol y recién ahí reenvía a la API. Publica el puerto 8000.
+- `keycloak`: proveedor OIDC. Realm `colonia` versionado en el repo. Publica el puerto 8180 para que el navegador pueda iniciar sesión.
+- `api`: Node.js + Express. Un único módulo `inscripciones`, que también contiene las rutas de turnos. Se conecta a `db:5432`. No publica un puerto al host y no valida el token.
 - `db`: PostgreSQL, sin puerto publicado, con healthcheck y volumen con nombre `colonia_pgdata`.
-- `cola`: RabbitMQ, sin puerto publicado, con healthcheck y volumen `colonia_rabbitmq`. Aún no tiene productores ni consumidores: no participa del flujo inicial.
-- `swagger-ui`: muestra `openapi.yaml` y reenvía `/api/` a la API por nombre de servicio. Comparte la red backend para ese proxy.
+- `cola`: RabbitMQ, sin puerto publicado, con healthcheck y volumen `colonia_rabbitmq`. Aún no tiene productores ni consumidores. El tope de 50 consultas por segundo al padrón sigue pendiente.
+- `swagger-ui`: muestra `openapi.yaml`, se autoriza contra Keycloak y reenvía `/api/` al gateway.
 
 **Requisito pendiente de implementación:** simular el padrón provincial y validar residencia en la jurisdicción, con un límite global de 50 consultas por segundo, incluidos reintentos. Es obligatorio para la entrega funcional; no es una mejora opcional. En este avance no se agrega su servicio ni se integra la cola.
 
@@ -90,11 +99,11 @@ Operación técnica:
 
 Las rutas se invocan desde el navegador con el prefijo del proxy: por ejemplo, `/api/turnos`. La API internamente recibe `/turnos`.
 
-En Swagger, **Try it out** devuelve 501 en todas las operaciones de negocio, sin guardar ni exponer datos personales. El listado no se reemplaza por un listado público de todos los tutores. JSON mal formado devuelve 400 y una ruta inexistente devuelve 404.
+En Swagger, **Try it out** sin Authorize devuelve 401. Con `beto`, crear un turno devuelve 403. Con `ana` o `beto` en una operación de su rol, el negocio sigue en 501, sin guardar datos. Una ruta inexistente devuelve 404.
 
 ## Reglas y flujo previstos (todavía no implementados)
 
-- El administrador consulta, corrige y cancela inscripciones con motivo; también gestiona turnos, cupos y fechas. El tutor inscribe y consulta sus propias inscripciones. El login y los permisos se incorporarán después.
+- El administrador consulta, corrige y cancela inscripciones con motivo; también gestiona turnos, cupos y fechas. El tutor inscribe y consulta sus propias inscripciones. El login y el control por rol ya están en el gateway. La titularidad (un tutor no lee inscripciones ajenas) se aplica cuando la API deje de responder 501.
 - El chico debe tener **de 6 a 12 años inclusive al registrar la inscripción**. Se calcula desde su fecha de nacimiento usando la fecha del servidor en `America/Argentina/Buenos_Aires`, no la fecha del inicio del turno ni una edad enviada por el cliente.
 - Se admite **una sola inscripción activa por DNI y convocatoria**, aunque se elijan turnos, sedes o tutores distintos. Son activas: `pendiente_de_validacion`, `confirmada` y `en_lista_de_espera`. Canceladas y rechazadas no bloquean una nueva solicitud, que recibe un nuevo orden.
 - La inscripción es gratuita. El período de recepción incluye la apertura y excluye el cierre. La validación puede terminar después del cierre si la solicitud fue recibida a tiempo.
@@ -118,7 +127,7 @@ La consigna plantea 40.000 cupos, 80 sedes, unas 200.000 familias, apertura a la
 
 La residencia mediante padrón simulado es un requisito de la entrega funcional. Las reservas provisionales por correcciones, el plazo de 48 horas y las prórrogas permanecen fuera del alcance. No se agregan módulos ni rutas por estos ajustes.
 
-**Estado actual:** todas las operaciones de negocio siguen respondiendo 501. No se guarda ni modifica información de chicos. Los roles son requisitos del diseño, no controles implementados; el payload no permite elegir un `tutorId`, cuya identidad se resolverá en la etapa OIDC.
+**Estado actual:** sin token, las operaciones de negocio responden 401. Con token de un rol que no alcanza, 403. Con un rol habilitado, siguen respondiendo 501. No se guarda ni modifica información de chicos. El payload no permite elegir un `tutorId`: la identidad sale del token.
 
 ## Configuración y persistencia
 
@@ -131,19 +140,19 @@ Modificar credenciales en `.env` no actualiza automáticamente las credenciales 
 Para apagar conservando los datos:
 
 ```powershell
-docker compose down
+docker compose -f docker-compose.yml -f docker-compose.auth.yml down
 ```
 
 Para validar la configuración sin imprimir contraseñas:
 
 ```powershell
-docker compose config --quiet
+docker compose -f docker-compose.yml -f docker-compose.auth.yml config --quiet
 ```
 
 Para esperar a que terminen los healthchecks al iniciar:
 
 ```powershell
-docker compose up -d --build --wait --wait-timeout 180
+docker compose -f docker-compose.yml -f docker-compose.auth.yml up -d --build --wait --wait-timeout 180
 ```
 
 ## Verificación rápida
@@ -153,11 +162,11 @@ Desde PowerShell:
 ```powershell
 Invoke-RestMethod http://localhost:3001/api/health
 curl.exe -i http://localhost:8080/api/turnos
-docker compose exec frontend wget -qO- http://api:3000/health
-docker compose exec cola rabbitmq-diagnostics -q ping
+docker compose -f docker-compose.yml -f docker-compose.auth.yml exec frontend wget -qO- http://gateway:8000/health
+docker compose -f docker-compose.yml -f docker-compose.auth.yml exec cola rabbitmq-diagnostics -q ping
 ```
 
-Resultados esperados: health con `status: ok`, turnos con 501 y `application/problem+json`, comunicación interna por `api` y broker disponible.
+Resultados esperados: health con `status: ok`, turnos sin token con 401 y `application/problem+json`, y broker disponible. La API no se consulta desde el host.
 
 También se puede ejecutar la comprobación HTTP de todas las rutas, con Node.js 22 o posterior:
 
@@ -174,7 +183,13 @@ Para puertos diferentes: `node scripts/smoke.mjs http://localhost:3001 http://lo
 - [x] Base sin puerto publicado, con volumen con nombre y healthcheck.
 - [x] Comunicación entre servicios por nombre.
 - [x] Configuración mediante variables de entorno y secretos en `.env` ignorado.
-- [x] Arranque documentado con `docker compose up -d --build`.
+- [x] Arranque documentado con los dos archivos de Compose.
+- [x] Keycloak en el Compose, realm `colonia` versionado e importado al arrancar.
+- [x] Roles `tutor` y `administrador`, con un usuario de prueba cada uno.
+- [x] Cliente público del frontend con PKCE y redirect exacto.
+- [x] Token validado solo en el gateway: firma, `iss`, `aud` y `exp` ([ADR-007](docs/adr/ADR-007-validacion-del-token.md)).
+- [x] 401 y 403 con Problem Details, y `securitySchemes` en `openapi.yaml`.
+- [x] La API no publica puerto. La contraseña de admin de Keycloak está en `.env`.
 
 La guía original se conserva en `docs/clase10-original.md`. El BFF mobile del ejemplo no forma parte del Compose de colonia; su código se conserva como referencia en `docs/template-bff-mobile/`.
 

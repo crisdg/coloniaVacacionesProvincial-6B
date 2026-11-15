@@ -5,25 +5,35 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Colonia de Vacaciones Provincial</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 760px; margin: 12vh auto; padding: 24px; color: #16342e; background: #f4f7f5; }
+    body { font-family: system-ui, sans-serif; max-width: 760px; margin: 8vh auto; padding: 24px; color: #16342e; background: #f4f7f5; }
     main { background: white; border: 1px solid #cbdcd5; border-radius: 16px; padding: 32px; }
     h1 { line-height: 1.15; } p { line-height: 1.6; }
-    a { color: #075e48; } #estado { padding: 16px; background: #edf4f0; border-radius: 8px; }
+    a, button { color: #075e48; }
+    button { background: #075e48; color: white; border: 0; border-radius: 8px; padding: 10px 14px; cursor: pointer; }
+    button.secundario { background: white; color: #075e48; border: 1px solid #075e48; }
+    .acciones { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+    #estado, #sesion, #resultado { padding: 16px; background: #edf4f0; border-radius: 8px; }
+    #resultado { white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 14px; }
   </style>
 </head>
 <body>
   <main>
     <p>PROYECTO · ARQUITECTURA DE SOFTWARE 1</p>
     <h1>Colonia de Vacaciones Provincial</h1>
-    <p>Entorno inicial del proyecto. Las pantallas de turnos e inscripciones estarán disponibles en una próxima etapa.</p>
+    <p>El ingreso usa Keycloak con Authorization Code y PKCE. El cliente <code>frontend</code> es público y vuelve a <code>http://localhost:3001/</code>.</p>
     <p id="estado" role="status">Comprobando conexión con el sistema…</p>
-    <a href="/api/health">Consultar estado del sistema</a>
+    <p id="sesion">Sin sesión.</p>
+    <div class="acciones">
+      <button id="ingresar" type="button">Ingresar</button>
+      <button id="salir" class="secundario" type="button" hidden>Salir</button>
+    </div>
+    <div id="acciones" class="acciones" hidden>
+      <button id="listar" type="button">Listar turnos</button>
+      <button id="crear" class="secundario" type="button">Crear turno</button>
+    </div>
+    <pre id="resultado">Elegí una acción después de ingresar. Listar turnos responde 501 para tutor y administrador. Crear turno responde 501 para el administrador y 403 para el tutor.</pre>
+    <p><a href="/api/health">Consultar estado del sistema</a></p>
   </main>
-  <script>
-    fetch('/api/health')
-      .then(response => { if (!response.ok) throw new Error(); return response.json(); })
-      .then(() => { document.querySelector('#estado').textContent = 'API y base de datos disponibles.'; })
-      .catch(() => { document.querySelector('#estado').textContent = 'No se pudo comprobar la disponibilidad del sistema.'; });
-  </script>
+  <script src="/auth.js"></script>
 </body>
 </html>

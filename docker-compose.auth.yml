@@ -13,8 +13,8 @@ services:
     image: quay.io/keycloak/keycloak:26.2.5
     command: ["start-dev", "--import-realm"]          # importa realm-colonia.json si el volumen está vacío
     environment:
-      KC_BOOTSTRAP_ADMIN_USERNAME: admin              # usuario de la consola de administración
-      KC_BOOTSTRAP_ADMIN_PASSWORD: admin              # en un proyecto real: .env fuera del repo
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_ADMIN_USERNAME:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:?Definir KC_ADMIN_PASSWORD en .env}
       KC_HEALTH_ENABLED: "true"
     volumes:
       - colonia_keycloak:/opt/keycloak/data           # vacío: Keycloak importa el realm; para reimportar, borrar este volumen
@@ -55,15 +55,23 @@ services:
   api:
     ports: !reset []
 
-  # Swagger UI ahora lee el contrato CON seguridad y sabe loguearse contra Keycloak.
+  # El navegador entra por el frontend; nginx reenvía /api al gateway.
+  frontend:
+    environment:
+      API_URL: http://gateway:8000
+    depends_on:
+      gateway:
+        condition: service_started
+
+  # Swagger UI lee el contrato con seguridad y se loguea contra Keycloak.
+  # /api/ del navegador también pasa por el gateway.
   swagger-ui:
     environment:
-      SWAGGER_JSON: /spec/openapi.auth.yaml
+      SWAGGER_JSON: /spec/openapi.yaml
+      API_URL: http://gateway:8000
       OAUTH_CLIENT_ID: swagger-ui
       OAUTH_USE_PKCE: "true"
       OAUTH_SCOPES: openid profile
-    volumes:
-      - ./auth/openapi.auth.yaml:/spec/openapi.auth.yaml:ro
 
 networks:
   identidad:

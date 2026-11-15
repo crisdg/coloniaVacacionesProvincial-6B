@@ -63,6 +63,7 @@ services:
     image: swaggerapi/swagger-ui:v5.17.14
     environment:
       SWAGGER_JSON: /spec/openapi.yaml
+      API_URL: http://api:3000
     volumes:
       - ./openapi.yaml:/spec/openapi.yaml:ro
       - ./swagger/default.conf.template:/etc/nginx/templates/default.conf.template:ro

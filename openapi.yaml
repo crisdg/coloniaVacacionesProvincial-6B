@@ -2,7 +2,7 @@ openapi: "3.0.3"
 info:
   title: "Colonia de Vacaciones Provincial"
   version: "0.3.0"
-  description: "Contrato del caso de uso y esqueleto de infraestructura (avance del 22/10). Incluye inscripción por el tutor, consulta por tutor y administrador, y corrección y cancelación administrativa con motivo. Solo GET /health está implementado. Los endpoints de negocio responden 501; sus respuestas de éxito documentan el comportamiento futuro. Sin autenticación ni autorización en esta etapa. Login OIDC, RBAC y respuestas 401/403 se incorporarán después. Cola preparada pero aún sin productor ni consumidor. La validación de residencia contra un padrón simulado es obligatoria para la entrega funcional y está pendiente de implementación. Reservas provisionales por correcciones, revisión de 48 horas y prórrogas quedan fuera del alcance."
+  description: "Contrato de Colonia de Vacaciones Provincial. La autenticación está delegada en Keycloak (OIDC, Authorization Code + PKCE) y la autorización es RBAC: el tutor consulta turnos, inscribe y consulta sus inscripciones; el administrador gestiona turnos, cupos y las inscripciones. El gateway valida firma, emisor, audiencia y vencimiento. Sin token responde 401; con un rol que no alcanza, 403, ambos con Problem Details. GET /health es público. Las operaciones de negocio siguen en 501; sus respuestas de éxito documentan el comportamiento futuro. Cola preparada pero aún sin productor ni consumidor. La validación de residencia contra un padrón simulado, con tope de 50 consultas por segundo, sigue pendiente. Reservas provisionales, revisión de 48 horas y prórrogas quedan fuera del alcance."
 servers:
   -
     url: "/api"
@@ -34,6 +34,7 @@ paths:
                 "$ref": "#/components/schemas/Health"
         "503":
           "$ref": "#/components/responses/NoDisponible"
+      security: []
   "/turnos":
     get:
       tags:
@@ -54,12 +55,16 @@ paths:
           "$ref": "#/components/responses/ErrorInterno"
         "501":
           "$ref": "#/components/responses/Pendiente"
+        "401":
+          "$ref": "#/components/responses/NoAutenticado"
+        "403":
+          "$ref": "#/components/responses/SinPermiso"
     post:
       tags:
         - "Turnos"
       operationId: "crearTurno"
       summary: "Crear un turno"
-      description: "Uso previsto: administrador de colonia. No se aplican permisos todavía. Actualmente devuelve 501."
+      description: "Rol: administrador. El gateway responde 403 si el token no tiene ese rol. La creación todavía devuelve 501."
       requestBody:
         required: true
         content:
@@ -85,6 +90,10 @@ paths:
           "$ref": "#/components/responses/ErrorInterno"
         "501":
           "$ref": "#/components/responses/Pendiente"
+        "401":
+          "$ref": "#/components/responses/NoAutenticado"
+        "403":
+          "$ref": "#/components/responses/SinPermiso"
   "/turnos/{id}":
     parameters:
       -
@@ -117,6 +126,10 @@ paths:
           "$ref": "#/components/responses/ErrorInterno"
         "501":
           "$ref": "#/components/responses/Pendiente"
+        "401":
+          "$ref": "#/components/responses/NoAutenticado"
+        "403":
+          "$ref": "#/components/responses/SinPermiso"
     patch:
       tags:
         - "Turnos"
@@ -146,6 +159,10 @@ paths:
           "$ref": "#/components/responses/ErrorInterno"
         "501":
           "$ref": "#/components/responses/Pendiente"
+        "401":
+          "$ref": "#/components/responses/NoAutenticado"
+        "403":
+          "$ref": "#/components/responses/SinPermiso"
   "/inscripciones":
     post:
       tags:
@@ -188,12 +205,16 @@ paths:
           "$ref": "#/components/responses/ErrorInterno"
         "501":
           "$ref": "#/components/responses/Pendiente"
+        "401":
+          "$ref": "#/components/responses/NoAutenticado"
+        "403":
+          "$ref": "#/components/responses/SinPermiso"
     get:
       tags:
         - "Inscripciones"
       operationId: "listarInscripciones"
       summary: "Consultar inscripciones según el rol"
-      description: "Uso previsto: el tutor consulta solo sus propias inscripciones; el administrador puede consultar todas. Identidad y permisos se incorporarán después; no se implementa un listado público provisional. Actualmente devuelve 501."
+      description: "Rol: tutor o administrador. El gateway exige uno de esos roles. El filtro por titularidad (el tutor solo ve las propias) se aplicará al devolver datos reales. Actualmente devuelve 501."
       responses:
         "200":
           description: "Inscripciones accesibles para el usuario."
@@ -209,6 +230,10 @@ paths:
           "$ref": "#/components/responses/ErrorInterno"
         "501":
           "$ref": "#/components/responses/Pendiente"
+        "401":
+          "$ref": "#/components/responses/NoAutenticado"
+        "403":
+          "$ref": "#/components/responses/SinPermiso"
   "/inscripciones/{id}":
     parameters:
       -
@@ -225,7 +250,7 @@ paths:
         - "Inscripciones"
       operationId: "obtenerInscripcion"
       summary: "Consultar una inscripción"
-      description: "Uso previsto: tutor propietario o administrador de colonia. La autorización se implementará en la etapa de seguridad; un tutor no podrá consultar inscripciones ajenas. Actualmente devuelve 501."
+      description: "Rol: tutor o administrador. El gateway exige uno de esos roles. Un tutor no podrá ver una inscripción ajena cuando la consulta devuelva datos reales. Actualmente devuelve 501."
       responses:
         "200":
           description: "Detalle de inscripción."
@@ -241,6 +266,10 @@ paths:
           "$ref": "#/components/responses/ErrorInterno"
         "501":
           "$ref": "#/components/responses/Pendiente"
+        "401":
+          "$ref": "#/components/responses/NoAutenticado"
+        "403":
+          "$ref": "#/components/responses/SinPermiso"
     patch:
       tags: [Inscripciones]
       operationId: "corregirInscripcion"
@@ -272,6 +301,10 @@ paths:
           "$ref": "#/components/responses/ErrorInterno"
         "501":
           "$ref": "#/components/responses/Pendiente"
+        "401":
+          "$ref": "#/components/responses/NoAutenticado"
+        "403":
+          "$ref": "#/components/responses/SinPermiso"
   "/inscripciones/{id}/cancelaciones":
     parameters:
       - name: "id"
@@ -312,6 +345,10 @@ paths:
           "$ref": "#/components/responses/ErrorInterno"
         "501":
           "$ref": "#/components/responses/Pendiente"
+        "401":
+          "$ref": "#/components/responses/NoAutenticado"
+        "403":
+          "$ref": "#/components/responses/SinPermiso"
 components:
   schemas:
     TurnoNuevo:
@@ -685,3 +722,46 @@ components:
             status: 503
             detail: "No se pudo comprobar la conexión con PostgreSQL."
             instance: "/health"
+    NoAutenticado:
+      description: "Falta el token, está vencido o no supera la validación de firma, emisor o audiencia."
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: "string"
+            example: "Bearer realm=\"colonia\""
+      content:
+        "application/problem+json":
+          schema:
+            "$ref": "#/components/schemas/ProblemDetails"
+          example:
+            type: "about:blank"
+            title: "No autenticado"
+            status: 401
+            detail: "Falta el header \"Authorization: Bearer <token>\"."
+            instance: "/turnos"
+    SinPermiso:
+      description: "El token es válido pero el rol no alcanza para esta operación."
+      content:
+        "application/problem+json":
+          schema:
+            "$ref": "#/components/schemas/ProblemDetails"
+          example:
+            type: "about:blank"
+            title: "Sin permiso"
+            status: 403
+            detail: "El rol no alcanza para esta operación."
+            instance: "/turnos"
+  securitySchemes:
+    keycloak:
+      type: "oauth2"
+      description: "OAuth 2.0 / OpenID Connect con Keycloak, realm colonia. Authorization Code con PKCE. En Swagger, cliente público swagger-ui, secreto vacío, scopes openid y profile. Documento de descubrimiento: http://localhost:8180/realms/colonia/.well-known/openid-configuration"
+      flows:
+        authorizationCode:
+          authorizationUrl: "http://localhost:8180/realms/colonia/protocol/openid-connect/auth"
+          tokenUrl: "http://localhost:8180/realms/colonia/protocol/openid-connect/token"
+          scopes:
+            openid: "Identidad del usuario (OIDC)"
+            profile: "Nombre y usuario"
+security:
+  - keycloak:
+      - openid

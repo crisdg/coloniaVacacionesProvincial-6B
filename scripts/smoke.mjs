@@ -22,18 +22,13 @@ for (const base of bases) {
       ...(body ? { body: JSON.stringify(body) } : {}),
       signal: AbortSignal.timeout(10000),
     });
-    assert.equal(response.status, 501, method + ' ' + path);
+    assert.equal(response.status, 401, method + ' ' + path);
     assert.match(response.headers.get('content-type'), /application\/problem\+json/);
     const problem = await response.json();
-    assert.equal(problem.status, 501);
+    assert.equal(problem.status, 401);
     assert.equal(problem.instance, path);
   }
   const missing = await fetch(base + '/api/no-existe');
   assert.equal(missing.status, 404);
-  const malformed = await fetch(base + '/api/turnos', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{',
-  });
-  assert.equal(malformed.status, 400);
-  console.log('OK: página, health, ' + routes.length + ' operaciones 501, ruta 404 y JSON inválido 400 en ' + base);
+  console.log('OK: página, health, ' + routes.length + ' operaciones 401 sin token y ruta 404 en ' + base);
 }
-

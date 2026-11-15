@@ -4,9 +4,9 @@ server {
     root /usr/share/nginx/html;
     index index.html;
     location /api/ {
-        proxy_pass http://api:3000/;
+        proxy_pass ${API_URL}/;
     }
-    location = /openapi.auth.yaml {
+    location = /openapi.yaml {
         add_header Cache-Control "no-store" always;
     }
     location / {
