@@ -1,8 +1,8 @@
 openapi: "3.0.3"
 info:
   title: "Colonia de Vacaciones Provincial"
-  version: "0.4.0"
-  description: "Contrato de Colonia de Vacaciones Provincial. La autenticación está delegada en Keycloak (OIDC, Authorization Code + PKCE) y la autorización es RBAC: el tutor consulta turnos, inscribe y consulta sus inscripciones; el administrador gestiona turnos, cupos y las inscripciones. El gateway valida firma, emisor, audiencia y vencimiento. Sin token responde 401; con un rol que no alcanza, 403, ambos con Problem Details. GET /health es público. Turnos e inscripciones están implementados sobre PostgreSQL. Las inscripciones quedan en pendiente_de_validacion: la cola y la validación de residencia contra el padrón simulado, con tope de 50 consultas por segundo, siguen pendientes, y hasta entonces ninguna pasa a confirmada, en_lista_de_espera ni rechazada. Reservas provisionales, revisión de 48 horas y prórrogas quedan fuera del alcance."
+  version: "0.5.0"
+  description: "Contrato de Colonia de Vacaciones Provincial. La autenticación está delegada en Keycloak (OIDC, Authorization Code + PKCE) y la autorización es RBAC: el tutor consulta turnos, inscribe y consulta sus inscripciones; el administrador gestiona turnos, cupos y las inscripciones. El gateway valida firma, emisor, audiencia y vencimiento. Sin token responde 401; con un rol que no alcanza, 403, ambos con Problem Details. GET /health es público. Turnos e inscripciones están implementados sobre PostgreSQL. La solicitud se guarda y responde 202 en pendiente_de_validacion; una cola consulta el padrón simulado con tope global de 50 consultas por segundo y después asigna el cupo en orden de recepción. Un DNI que termina en 0 no reside en la jurisdicción. Reservas provisionales, revisión de 48 horas y prórrogas quedan fuera del alcance."
 servers:
   -
     url: "/api"
@@ -13,7 +13,7 @@ tags:
     description: "Consulta y gestión de turnos, cupos y fechas."
   -
     name: "Inscripciones"
-    description: "Registro, consulta y gestión de inscripciones. La validación de residencia con el padrón sigue pendiente."
+    description: "Registro, validación de residencia, consulta y gestión de inscripciones."
   -
     name: "Infraestructura"
     description: "Disponibilidad del sistema."
@@ -24,7 +24,7 @@ paths:
         - "Infraestructura"
       operationId: "obtenerSalud"
       summary: "Comprobar API y conexión a PostgreSQL"
-      description: "Implementado. No comprueba la cola, que no participa todavía del flujo."
+      description: "Implementado. Comprueba la API y PostgreSQL. No incluye la cola: si el broker no está, las solicitudes igual se guardan y se publican cuando vuelve."
       responses:
         "200":
           description: "API y base disponibles."
@@ -129,7 +129,7 @@ paths:
         - "Turnos"
       operationId: "actualizarTurno"
       summary: "Actualizar cupos, fechas o nombre del turno"
-      description: "Rol: administrador. No invalida inscripciones existentes. Un cupo menor que los confirmados responde 409. El aumento de cupo permitirá avanzar a las solicitudes elegibles en orden, sin adelantar pendientes de validación del mismo turno, cuando exista la validación por padrón."
+      description: "Rol: administrador. No invalida inscripciones existentes. Un cupo menor que los confirmados responde 409. Si el cupo aumenta, las solicitudes ya elegibles del turno avanzan en orden de recepción y no se adelantan las que siguen pendientes de validación."
       requestBody:
         required: true
         content:
@@ -161,7 +161,7 @@ paths:
         - "Inscripciones"
       operationId: "crearInscripcion"
       summary: "Inscribir a un chico en un turno"
-      description: "Rol: tutor. El tutor sale del token. Requiere período abierto (apertura inclusiva y cierre exclusivo; si no, 409) y edad de 6 a 12 años inclusive al registrar la solicitud, con la fecha del servidor en America/Argentina/Buenos_Aires (si no, 400). Una sola inscripción activa por DNI y convocatoria, incluso entre turnos y sedes diferentes y con pedidos concurrentes (si no, 409). La convocatoria se obtiene del turno. Registra la solicitud y su orden antes de responder 202 con estado pendiente_de_validacion. Una nueva solicitud tras cancelación o rechazo recibe nuevo orden. Pendiente: la cola consultará el padrón simulado con límite global de 50 consultas por segundo, confirmará solo residentes de la jurisdicción y no adelantará solicitudes anteriores pendientes del mismo turno."
+      description: "Rol: tutor. El tutor sale del token. Requiere período abierto (apertura inclusiva y cierre exclusivo; si no, 409) y edad de 6 a 12 años inclusive al registrar la solicitud, con la fecha del servidor en America/Argentina/Buenos_Aires (si no, 400). Una sola inscripción activa por DNI y convocatoria, incluso entre turnos y sedes diferentes y con pedidos concurrentes (si no, 409). La convocatoria se obtiene del turno. Registra la solicitud y su orden antes de responder 202 con estado pendiente_de_validacion. Una nueva solicitud tras cancelación o rechazo recibe nuevo orden. Después, la cola consulta el padrón simulado con límite global de 50 consultas por segundo, incluidos los reintentos. Confirma solo a quien reside en la jurisdicción y no adelanta solicitudes anteriores pendientes del mismo turno. Una falla técnica deja la solicitud pendiente."
       requestBody:
         required: true
         content:
@@ -260,7 +260,7 @@ paths:
       tags: [Inscripciones]
       operationId: "corregirInscripcion"
       summary: "Corregir datos de una inscripción"
-      description: "Rol: administrador. Corrige nombre, apellido o fecha de nacimiento del mismo chico sin cambiar turno, convocatoria, estado ni orden de recepción. Vuelve a comprobar la edad a la fecha original de inscripción (si no, 400). No corrige inscripciones canceladas o rechazadas (409). Cambiar el DNI requiere validar residencia con el padrón: hasta que exista, responde 501."
+      description: "Rol: administrador. Corrige nombre, apellido, fecha de nacimiento o DNI del mismo chico sin cambiar turno, convocatoria, estado ni orden de recepción. Vuelve a comprobar la edad a la fecha original de inscripción (si no, 400). No corrige inscripciones canceladas o rechazadas (409). Si cambia el DNI, consulta el padrón antes de aceptar el cambio: sin residencia responde 409 y el DNI anterior queda igual; si el padrón no responde, 503 y tampoco se modifica. Un DNI que ya tiene otra inscripción activa en la convocatoria responde 409."
       requestBody:
         required: true
         content:
@@ -285,8 +285,8 @@ paths:
           "$ref": "#/components/responses/Conflicto"
         "500":
           "$ref": "#/components/responses/ErrorInterno"
-        "501":
-          "$ref": "#/components/responses/Pendiente"
+        "503":
+          "$ref": "#/components/responses/PadronNoDisponible"
         "401":
           "$ref": "#/components/responses/NoAutenticado"
         "403":
@@ -305,7 +305,7 @@ paths:
       tags: [Inscripciones]
       operationId: "cancelarInscripcion"
       summary: "Cancelar una inscripción con motivo"
-      description: "Rol: administrador. Cancela con motivo obligatorio. Puede cancelar una solicitud pendiente, confirmada o en espera. Si estaba confirmada, libera la plaza. Cancelar una pendiente o en espera no libera una plaza ocupada. Una inscripción cancelada o rechazada devuelve 409. Pendiente: la asignación en orden de la plaza liberada llegará con la validación por padrón."
+      description: "Rol: administrador. Cancela con motivo obligatorio. Puede cancelar una solicitud pendiente, confirmada o en espera. Si estaba confirmada, libera la plaza y la asignación continúa en orden. Cancelar una pendiente o en espera no libera una plaza ocupada. Una cancelada deja de bloquear el turno y no puede confirmarse por un resultado tardío del padrón. Una inscripción cancelada o rechazada devuelve 409."
       requestBody:
         required: true
         content:
@@ -416,7 +416,7 @@ components:
           type: "integer"
           minimum: 0
           example: 30
-      description: "Actualización parcial. Validar las fechas combinando valores actuales y nuevos. El cupo no puede ser inferior a las inscripciones confirmadas. Un aumento permite avanzar en orden sin adelantar solicitudes pendientes de validación del mismo turno. Sede y convocatoria no se modifican."
+      description: "Actualización parcial. Validar las fechas combinando valores actuales y nuevos. El cupo no puede ser inferior a las inscripciones confirmadas. Un aumento confirma en orden a quien ya está en lista de espera, sin adelantar solicitudes pendientes de validación del mismo turno. Sede y convocatoria no se modifican."
     Turno:
       type: "object"
       required:
@@ -495,7 +495,7 @@ components:
           type: "string"
           pattern: "^[0-9]{7,8}$"
           example: "55123456"
-          description: "DNI argentino, sin puntos. Identifica al chico para comprobar unicidad de inscripción activa en toda la convocatoria."
+          description: "DNI argentino, sin puntos. Identifica al chico para comprobar unicidad de inscripción activa en toda la convocatoria. El padrón simulado responde que no reside en la jurisdicción de la convocatoria si el número termina en 0."
         nombre:
           type: "string"
           minLength: 1
@@ -682,18 +682,6 @@ components:
             status: 500
             detail: "Error inesperado."
             instance: "/turnos"
-    Pendiente:
-      description: "La operación pedida depende de una parte todavía no implementada, como el padrón de residentes."
-      content:
-        "application/problem+json":
-          schema:
-            "$ref": "#/components/schemas/ProblemDetails"
-          example:
-            type: "about:blank"
-            title: "Funcionalidad pendiente"
-            status: 501
-            detail: "Corregir el DNI requiere validar la residencia con el padrón, que todavía no está implementado."
-            instance: "/inscripciones/1"
     NoDisponible:
       description: "No se pudo comprobar la conexión con PostgreSQL."
       content:
@@ -706,6 +694,18 @@ components:
             status: 503
             detail: "No se pudo comprobar la conexión con PostgreSQL."
             instance: "/health"
+    PadronNoDisponible:
+      description: "No se pudo consultar el padrón. El cambio de DNI no se aplicó."
+      content:
+        "application/problem+json":
+          schema:
+            "$ref": "#/components/schemas/ProblemDetails"
+          example:
+            type: "about:blank"
+            title: "Servicio no disponible"
+            status: 503
+            detail: "No se pudo consultar el padrón. La inscripción no se modificó."
+            instance: "/inscripciones/1"
     NoAutenticado:
       description: "Falta el token, está vencido o no supera la validación de firma, emisor o audiencia."
       headers:

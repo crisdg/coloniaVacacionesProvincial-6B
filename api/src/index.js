@@ -2,6 +2,7 @@ import express from 'express';
 import { migrar, pool } from './db.js';
 import turnos from './modules/inscripciones/turnos.routes.js';
 import inscripciones from './modules/inscripciones/routes.js';
+import { iniciarCola } from './modules/inscripciones/cola.js';
 import { identidad } from './shared/identidad.js';
 import { ErrorHttp, problem } from './shared/problem.js';
 
@@ -29,5 +30,6 @@ app.use((err, req, res, next) => {
 });
 
 await migrar();
+iniciarCola();
 const port = Number(process.env.PORT ?? 3000);
 app.listen(port, () => console.log(`API de Colonia de Vacaciones escuchando en ${port}`));

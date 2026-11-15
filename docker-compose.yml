@@ -19,8 +19,15 @@ services:
       DB_NAME: ${POSTGRES_DB:?Definir POSTGRES_DB en .env}
       DB_USER: ${POSTGRES_USER:?Definir POSTGRES_USER en .env}
       DB_PASSWORD: ${POSTGRES_PASSWORD:?Definir POSTGRES_PASSWORD en .env}
+      COLA_HOST: cola
+      COLA_PORT: 5672
+      COLA_USER: ${RABBITMQ_USER:?Definir RABBITMQ_USER en .env}
+      COLA_PASSWORD: ${RABBITMQ_PASSWORD:?Definir RABBITMQ_PASSWORD en .env}
+      PADRON_CONSULTAS_POR_SEGUNDO: 50
     depends_on:
       db:
+        condition: service_healthy
+      cola:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]

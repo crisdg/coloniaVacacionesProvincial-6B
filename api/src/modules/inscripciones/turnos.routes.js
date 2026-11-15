@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { enTransaccion, pool } from '../../db.js';
 import { inicioDelDia } from '../../shared/fechas.js';
 import { conflicto, invalido, noEncontrado } from '../../shared/problem.js';
+import { asignarTurno } from './asignacion.js';
 import { entero, fecha, fechaHora, idDeRuta, texto, validarObjeto } from '../../shared/validacion.js';
 
 const CAMPOS_EDITABLES = {
@@ -108,6 +109,7 @@ router.patch('/:id', async (req, res) => {
       [id, combinado.nombre, combinado.fechaInicio, combinado.fechaFin,
         combinado.inscripcionAbreEn, combinado.inscripcionCierraEn, combinado.cupoTotal],
     );
+    if (combinado.cupoTotal > actual.cupoTotal) await asignarTurno(id, client);
     return buscarTurno(id, client);
   });
   res.json(turno);
