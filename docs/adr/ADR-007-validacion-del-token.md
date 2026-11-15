@@ -33,4 +33,5 @@ Los permisos están en el gateway, asignados al rol y no a la persona: tutor con
 ## Consecuencias
 
 * **Ganancia:** Una sola puerta aplica firma, emisor, audiencia, vencimiento y rol. Swagger y el frontend llegan a la API solo a través del gateway.
-* **Resignación:** Quien esté dentro de la red de Compose puede llamar a la API sin token. El puerto de la API no se publica en el host. La titularidad de cada inscripción (un tutor no lee la de otro) queda para cuando la API devuelva datos reales; el gateway hoy distingue roles, no dueños.
+* **Resignación:** Quien esté dentro de la red de Compose puede llamar a la API sin token. El puerto de la API no se publica en el host.
+* **Identidad hacia la API:** el gateway arma de cero los headers del pedido reenviado y agrega `X-Usuario-Id` (el `sub` del token) y `X-Usuario-Roles`. Un `X-Usuario-*` que mande el cliente nunca llega a la API. La API usa esos headers para la titularidad, porque el gateway distingue roles pero no dueños: un tutor solo ve sus inscripciones.
