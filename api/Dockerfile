@@ -7,8 +7,9 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
-# Después el código
+# Después el código y las migraciones que aplica al arrancar
 COPY src ./src
+COPY migrations ./migrations
 
 EXPOSE 3000
 CMD ["node", "src/index.js"]

@@ -30,5 +30,10 @@ for (const base of bases) {
   }
   const missing = await fetch(base + '/api/no-existe');
   assert.equal(missing.status, 404);
-  console.log('OK: página, health, ' + routes.length + ' operaciones 401 sin token y ruta 404 en ' + base);
+  const malformed = await fetch(base + '/api/turnos', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{',
+  });
+  assert.equal(malformed.status, 400);
+  assert.match(malformed.headers.get('content-type'), /application\/problem\+json/);
+  console.log('OK: página, health, ' + routes.length + ' operaciones 401 sin token, ruta 404 y JSON inválido 400 en ' + base);
 }

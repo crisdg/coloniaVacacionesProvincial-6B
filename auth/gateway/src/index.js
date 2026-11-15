@@ -87,6 +87,8 @@ app.use(async (req, res) => {
   const regla = REGLAS.find((r) => r.metodo === req.method && r.ruta.test(req.path));
   if (!regla) return problem(res, 404, 'No encontrado', `No hay ruta ${req.method} ${req.path} en el gateway.`, req.originalUrl);
 
+  // Los headers hacia la API se arman de cero: un X-Usuario-* que mande el cliente nunca llega.
+  const headers = { 'Content-Type': 'application/json' };
   if (regla.roles) {
     const { usuario, error } = await autenticar(req);
     // 401: no sé quién sos
@@ -98,12 +100,15 @@ app.use(async (req, res) => {
         `${usuario.preferred_username ?? usuario.azp} tiene los roles [${roles.join(', ')}] y esta operación requiere uno de [${regla.roles.join(', ')}].`,
         req.originalUrl);
     }
+    // La API confía en estos headers porque solo el gateway la alcanza (ADR-007).
+    headers['X-Usuario-Id'] = usuario.sub;
+    headers['X-Usuario-Roles'] = roles.join(',');
   }
 
   try {
     const resp = await fetch(API_URL + req.originalUrl, {
       method: req.method,
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: ['POST', 'PUT', 'PATCH'].includes(req.method) ? JSON.stringify(req.body ?? {}) : undefined,
     });
     // Solo copiamos los headers que importan (el CORS lo maneja el gateway, no la API)
@@ -113,6 +118,14 @@ app.use(async (req, res) => {
     console.error(err.message);
     problem(res, 502, 'API no disponible', `El gateway no pudo comunicarse con ${API_URL}.`, req.originalUrl);
   }
+});
+
+app.use((err, req, res, next) => {
+  if (err.type === 'entity.parse.failed') {
+    return problem(res, 400, 'JSON inválido', 'El cuerpo debe contener JSON válido.', req.originalUrl);
+  }
+  console.error(err);
+  problem(res, 500, 'Error interno', 'Ocurrió un error inesperado en el gateway.', req.originalUrl);
 });
 
 app.listen(PORT, () => console.log(`Gateway en ${PORT} → API ${API_URL} · emisor esperado ${ISSUER}`));

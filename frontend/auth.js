@@ -134,16 +134,19 @@ async function listarTurnos() {
 }
 
 async function crearTurno() {
+  const dentroDeDias = (dias) => new Date(Date.now() + dias * 86_400_000);
   await llamar('/api/turnos', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
+      convocatoriaId: 'verano-2027',
+      sedeId: 1,
       nombre: 'Turno mañana',
-      convocatoriaId: 'convocatoria-2026',
-      sedeId: 'sede-centro',
-      cupoTotal: 40,
-      fechaApertura: '2026-10-01',
-      fechaCierre: '2026-11-01',
+      fechaInicio: dentroDeDias(30).toISOString().slice(0, 10),
+      fechaFin: dentroDeDias(50).toISOString().slice(0, 10),
+      inscripcionAbreEn: new Date().toISOString(),
+      inscripcionCierraEn: dentroDeDias(20).toISOString(),
+      cupoTotal: 30,
     }),
   });
 }
