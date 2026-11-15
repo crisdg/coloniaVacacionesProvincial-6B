@@ -4,7 +4,7 @@ server {
     root /usr/share/nginx/html;
     index index.html;
     location /api/ {
-        proxy_pass ${API_URL}/;
+        proxy_pass ${API_UPSTREAM}/;
     }
     location = /openapi.yaml {
         add_header Cache-Control "no-store" always;

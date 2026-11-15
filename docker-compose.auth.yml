@@ -68,7 +68,7 @@ services:
   swagger-ui:
     environment:
       SWAGGER_JSON: /spec/openapi.yaml
-      API_URL: http://gateway:8000
+      API_UPSTREAM: http://gateway:8000
       OAUTH_CLIENT_ID: swagger-ui
       OAUTH_USE_PKCE: "true"
       OAUTH_SCOPES: openid profile
