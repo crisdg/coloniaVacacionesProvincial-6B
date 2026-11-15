@@ -7,10 +7,10 @@ import { createRemoteJWKSet, jwtVerify } from 'jose';
 const PORT = Number(process.env.PORT ?? 8000);
 const API_URL = process.env.API_URL ?? 'http://localhost:3000';
 // Las claves PÚBLICAS de Keycloak se buscan por la red interna (service discovery: "keycloak")...
-const JWKS_URL = process.env.JWKS_URL ?? 'http://localhost:8180/realms/cursos/protocol/openid-connect/certs';
+const JWKS_URL = process.env.JWKS_URL ?? 'http://localhost:8180/realms/colonia/protocol/openid-connect/certs';
 // ...pero el emisor (iss) del token es la URL que vio el NAVEGADOR al loguearse.
-const ISSUER = process.env.ISSUER ?? 'http://localhost:8180/realms/cursos';
-const AUDIENCE = process.env.AUDIENCE ?? 'api-cursos';
+const ISSUER = process.env.ISSUER ?? 'http://localhost:8180/realms/colonia';
+const AUDIENCE = process.env.AUDIENCE ?? 'api-colonia';
 const CORS_ORIGIN = process.env.CORS_ORIGIN ?? 'http://localhost:8080';
 
 // Se descarga la primera vez que se valida un token y queda en caché.
@@ -70,7 +70,7 @@ const rolesDe = (usuario) => usuario?.realm_access?.roles ?? [];
 // ---------- /yo: muestra qué dice tu token (para aprender; no lo copies a sitios externos) ----------
 app.get('/yo', async (req, res) => {
   const { usuario, error } = await autenticar(req);
-  if (error) return problem(res, 401, 'No autenticado', error, req.originalUrl, { 'WWW-Authenticate': 'Bearer realm="cursos"' });
+  if (error) return problem(res, 401, 'No autenticado', error, req.originalUrl, { 'WWW-Authenticate': 'Bearer realm="colonia"' });
   res.json({
     usuario: usuario.preferred_username ?? `(cliente) ${usuario.azp}`,
     roles: rolesDe(usuario),
@@ -90,7 +90,7 @@ app.use(async (req, res) => {
   if (regla.roles) {
     const { usuario, error } = await autenticar(req);
     // 401: no sé quién sos
-    if (error) return problem(res, 401, 'No autenticado', error, req.originalUrl, { 'WWW-Authenticate': 'Bearer realm="cursos"' });
+    if (error) return problem(res, 401, 'No autenticado', error, req.originalUrl, { 'WWW-Authenticate': 'Bearer realm="colonia"' });
     // 403: sé quién sos, pero tu rol no alcanza
     const roles = rolesDe(usuario);
     if (!regla.roles.some((r) => roles.includes(r))) {

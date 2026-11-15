@@ -7,8 +7,7 @@ info:
     Incluye turnos, chicos e inscripciones del esqueleto de colonia. Las respuestas de éxito describen el comportamiento
     previsto; la API de negocio mantiene 501 Funcionalidad pendiente.
 
-    Usar Authorize, cliente swagger-ui, secreto vacío y scopes openid y profile. Se conserva el realm cursos para
-    utilizar el proveedor de identidad existente.
+    Usar Authorize, cliente swagger-ui, secreto vacío y scopes openid y profile. El login va al realm colonia.
 
     Usuarios de prueba: ana / ana123 (administrador) y beto / beto123 (tutor).
 
@@ -790,7 +789,7 @@ components:
         WWW-Authenticate:
           schema:
             type: string
-            example: Bearer realm="cursos"
+            example: Bearer realm="colonia"
       content:
         application/problem+json:
           schema:
@@ -807,13 +806,13 @@ components:
       description: 'OAuth 2.0 / OpenID Connect con Keycloak. Flujo Authorization Code con PKCE (cliente público
         "swagger-ui").
 
-        Documento de descubrimiento OIDC: http://localhost:8180/realms/cursos/.well-known/openid-configuration
+        Documento de descubrimiento OIDC: http://localhost:8180/realms/colonia/.well-known/openid-configuration
 
         '
       flows:
         authorizationCode:
-          authorizationUrl: http://localhost:8180/realms/cursos/protocol/openid-connect/auth
-          tokenUrl: http://localhost:8180/realms/cursos/protocol/openid-connect/token
+          authorizationUrl: http://localhost:8180/realms/colonia/protocol/openid-connect/auth
+          tokenUrl: http://localhost:8180/realms/colonia/protocol/openid-connect/token
           scopes:
             openid: Identidad del usuario (OIDC)
             profile: Nombre y usuario

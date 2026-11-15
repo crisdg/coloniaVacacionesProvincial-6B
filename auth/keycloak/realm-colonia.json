@@ -1,6 +1,6 @@
 {
-  "realm": "cursos",
-  "displayName": "Cursos · Arquitectura de Software 1",
+  "realm": "colonia",
+  "displayName": "Colonia de Vacaciones",
   "enabled": true,
   "sslRequired": "none",
   "internationalizationEnabled": true,
@@ -11,8 +11,6 @@
   "accessTokenLifespan": 300,
   "roles": {
     "realm": [
-      { "name": "alumno",  "description": "Puede ver cursos" },
-      { "name": "docente", "description": "Puede ver, crear y borrar cursos" },
       { "name": "tutor", "description": "Consulta turnos, solicita inscripciones y consulta las propias" },
       { "name": "administrador", "description": "Gestiona turnos y consulta, corrige y cancela inscripciones" }
     ]
@@ -22,34 +20,28 @@
       "username": "ana",
       "firstName": "Ana",
       "lastName": "Administradora",
-      "email": "ana@cursos.local",
+      "email": "ana@colonia.local",
       "emailVerified": true,
       "enabled": true,
       "credentials": [ { "type": "password", "value": "ana123", "temporary": false } ],
-      "realmRoles": [ "administrador", "docente" ]
+      "realmRoles": [ "administrador" ]
     },
     {
       "username": "beto",
       "firstName": "Beto",
       "lastName": "Tutor",
-      "email": "beto@cursos.local",
+      "email": "beto@colonia.local",
       "emailVerified": true,
       "enabled": true,
       "credentials": [ { "type": "password", "value": "beto123", "temporary": false } ],
-      "realmRoles": [ "tutor", "alumno" ]
-    },
-    {
-      "username": "service-account-servicio-reportes",
-      "enabled": true,
-      "serviceAccountClientId": "servicio-reportes",
-      "realmRoles": [ "alumno" ]
+      "realmRoles": [ "tutor" ]
     }
   ],
   "clients": [
     {
-      "clientId": "swagger-ui",
-      "name": "Swagger UI (cliente público)",
-      "description": "Corre en el navegador: no puede guardar un secreto. Usa Authorization Code + PKCE.",
+      "clientId": "frontend",
+      "name": "Frontend (cliente público)",
+      "description": "Corre en el navegador: no puede guardar un secreto. Usa Authorization Code + PKCE S256.",
       "enabled": true,
       "publicClient": true,
       "protocol": "openid-connect",
@@ -57,16 +49,20 @@
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
-      "redirectUris": [ "http://localhost:8080/oauth2-redirect.html" ],
-      "webOrigins": [ "http://localhost:8080" ],
-      "attributes": { "pkce.code.challenge.method": "S256", "post.logout.redirect.uris": "http://localhost:8080/*" },
+      "fullScopeAllowed": true,
+      "redirectUris": [ "http://localhost:3001/" ],
+      "webOrigins": [ "http://localhost:3001" ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:3001/"
+      },
       "protocolMappers": [
         {
-          "name": "audiencia-api-cursos",
+          "name": "audiencia-api-colonia",
           "protocol": "openid-connect",
           "protocolMapper": "oidc-audience-mapper",
           "config": {
-            "included.custom.audience": "api-cursos",
+            "included.custom.audience": "api-colonia",
             "access.token.claim": "true",
             "id.token.claim": "false"
           }
@@ -74,25 +70,30 @@
       ]
     },
     {
-      "clientId": "servicio-reportes",
-      "name": "Servicio de reportes (cliente confidencial, M2M)",
-      "description": "Un servicio que llama a la API sin usuario: se autentica con su propio client_secret (client_credentials).",
+      "clientId": "swagger-ui",
+      "name": "Swagger UI (cliente público)",
+      "description": "Corre en el navegador: no puede guardar un secreto. Usa Authorization Code + PKCE S256.",
       "enabled": true,
-      "publicClient": false,
-      "clientAuthenticatorType": "client-secret",
-      "secret": "reportes-secreto-solo-para-la-practica",
+      "publicClient": true,
       "protocol": "openid-connect",
-      "standardFlowEnabled": false,
+      "standardFlowEnabled": true,
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": false,
-      "serviceAccountsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "redirectUris": [ "http://localhost:8080/oauth2-redirect.html" ],
+      "webOrigins": [ "http://localhost:8080" ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:8080/oauth2-redirect.html"
+      },
       "protocolMappers": [
         {
-          "name": "audiencia-api-cursos",
+          "name": "audiencia-api-colonia",
           "protocol": "openid-connect",
           "protocolMapper": "oidc-audience-mapper",
           "config": {
-            "included.custom.audience": "api-cursos",
+            "included.custom.audience": "api-colonia",
             "access.token.claim": "true",
             "id.token.claim": "false"
           }

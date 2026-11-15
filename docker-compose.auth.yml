@@ -11,12 +11,13 @@ services:
   # Proveedor de identidad OIDC. Modo desarrollo: sin HTTPS y con base interna (no usar así en producción).
   keycloak:
     image: quay.io/keycloak/keycloak:26.2.5
-    command: ["start-dev", "--import-realm"]          # importa el realm "cursos" la primera vez
+    command: ["start-dev", "--import-realm"]          # importa realm-colonia.json si el volumen está vacío
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin              # usuario de la consola de administración
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin              # en un proyecto real: .env fuera del repo
       KC_HEALTH_ENABLED: "true"
     volumes:
+      - colonia_keycloak:/opt/keycloak/data           # vacío: Keycloak importa el realm; para reimportar, borrar este volumen
       - ./auth/keycloak:/opt/keycloak/data/import:ro  # bind mount: el realm versionado en el repo
     ports:
       - "8180:8080"                                    # 8080 ya lo usa swagger-ui en el host
@@ -36,9 +37,9 @@ services:
     environment:
       PORT: 8000
       API_URL: http://api:3000                                                     # por la red backend
-      JWKS_URL: http://keycloak:8080/realms/cursos/protocol/openid-connect/certs   # por la red identidad
-      ISSUER: http://localhost:8180/realms/cursos     # el "iss" que pone Keycloak cuando el navegador entra por localhost:8180
-      AUDIENCE: api-cursos
+      JWKS_URL: http://keycloak:8080/realms/colonia/protocol/openid-connect/certs   # por la red identidad
+      ISSUER: http://localhost:8180/realms/colonia     # el "iss" que pone Keycloak cuando el navegador entra por localhost:8180
+      AUDIENCE: api-colonia
       CORS_ORIGIN: http://localhost:8080
     ports:
       - "8000:8000"
@@ -66,3 +67,6 @@ services:
 
 networks:
   identidad:
+
+volumes:
+  colonia_keycloak:
