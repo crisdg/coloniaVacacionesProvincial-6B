@@ -56,7 +56,7 @@ async function publicarPendientes() {
 
 // La consulta al padrón ocurre fuera de la transacción: el tope puede hacer esperar
 // y no conviene retener el lock del turno mientras tanto.
-async function resolverInscripcion(inscripcionId) {
+export async function resolverInscripcion(inscripcionId, consultar = consultarPadron) {
   const { rows } = await pool.query(
     `SELECT i.id, i.turno_id, i.documento, i.estado, i.es_residente, c.jurisdiccion
      FROM colonia.inscripciones i
@@ -69,7 +69,7 @@ async function resolverInscripcion(inscripcionId) {
   let residente;
   let documentoConsultado;
   if (previa.estado === 'pendiente_de_validacion' && previa.es_residente === null) {
-    residente = await consultarPadron(previa.documento, previa.jurisdiccion);
+    residente = await consultar(previa.documento, previa.jurisdiccion);
     documentoConsultado = previa.documento;
   }
   await enTransaccion(async (client) => {

@@ -5,6 +5,8 @@ import { once } from 'node:events';
 import { before, after, test } from 'node:test';
 import express from 'express';
 import pg from 'pg';
+import { crearConsultaPadron } from '../src/modules/inscripciones/padron-cliente.js';
+import { crearPadronSimulado } from '../src/modules/inscripciones/padron-simulado.js';
 
 const conexion = {
   host: process.env.DB_HOST, port: Number(process.env.DB_PORT),
@@ -291,4 +293,67 @@ test('claves vacías, inválidas o demasiado largas devuelven 400 sin crear una 
   }
   const { rows } = await pool.query('SELECT count(*)::int AS n FROM colonia.inscripciones WHERE turno_id = $1', [turno]);
   assert.equal(rows[0].n, 0);
+});
+
+test('las fallas del padrón conservan inscripción y orden, y permiten resolver en otro intento', async () => {
+  const { resolverInscripcion } = await import('../src/modules/inscripciones/cola.js');
+  const { reservarConsulta } = await import('../src/modules/inscripciones/padron-limite.js');
+  for (const [indice, codigo] of ['NO_DISPONIBLE', 'SATURADO'].entries()) {
+    const turno = await crearTurno();
+    const alta = await solicitar(turno, `9300000${indice + 1}`);
+    assert.equal(alta.status, 202);
+    const consultar = crearConsultaPadron({
+      reservarConsulta,
+      consultarResidencia: crearPadronSimulado({ escenarios: [{ error: codigo }] }),
+    });
+    const antes = await pool.query('SELECT coalesce(sum(cantidad), 0)::int AS n FROM colonia.consultas_padron');
+    await assert.rejects(resolverInscripcion(alta.body.id, consultar), { codigo });
+    const pendiente = await pool.query(`SELECT estado, es_residente, orden_recepcion, motivo_rechazo
+      FROM colonia.inscripciones WHERE id = $1`, [alta.body.id]);
+    assert.deepEqual(pendiente.rows[0], {
+      estado: 'pendiente_de_validacion', es_residente: null,
+      orden_recepcion: String(alta.body.ordenRecepcion), motivo_rechazo: null,
+    });
+    await resolverInscripcion(alta.body.id, consultar);
+    const resuelta = await pool.query('SELECT estado, orden_recepcion FROM colonia.inscripciones WHERE id = $1', [alta.body.id]);
+    assert.deepEqual(resuelta.rows[0], { estado: 'confirmada', orden_recepcion: String(alta.body.ordenRecepcion) });
+    const despues = await pool.query('SELECT sum(cantidad)::int AS n FROM colonia.consultas_padron');
+    assert.equal(despues.rows[0].n - antes.rows[0].n, 2);
+  }
+});
+
+test('una respuesta lenta del adaptador no permite adelantar a otra inscripción', async () => {
+  const { resolverInscripcion } = await import('../src/modules/inscripciones/cola.js');
+  const { reservarConsulta } = await import('../src/modules/inscripciones/padron-limite.js');
+  const turno = await crearTurno();
+  const primera = await solicitar(turno, '93000003');
+  const segunda = await solicitar(turno, '93000004');
+  assert.equal(primera.status, 202);
+  assert.equal(segunda.status, 202);
+  let liberar, avisar;
+  const pausa = new Promise(resolve => { liberar = resolve; });
+  const inicio = new Promise(resolve => { avisar = resolve; });
+  const consultar = crearConsultaPadron({
+    reservarConsulta,
+    consultarResidencia: crearPadronSimulado({
+      escenarios: [{ demoraMs: 500 }],
+      esperar: () => { avisar(); return pausa; },
+    }),
+  });
+  const lenta = resolverInscripcion(primera.body.id, consultar);
+  try {
+    await Promise.race([inicio, lenta.then(() => assert.fail('La primera consulta no esperó.'))]);
+    await resolverInscripcion(segunda.body.id, consultar);
+    const { rows } = await pool.query(`SELECT estado, es_residente FROM colonia.inscripciones
+      WHERE turno_id = $1 ORDER BY orden_recepcion`, [turno]);
+    assert.deepEqual(rows, [
+      { estado: 'pendiente_de_validacion', es_residente: null },
+      { estado: 'pendiente_de_validacion', es_residente: true },
+    ]);
+  } finally {
+    liberar();
+    await lenta;
+  }
+  const { rows } = await pool.query('SELECT estado FROM colonia.inscripciones WHERE turno_id = $1 ORDER BY orden_recepcion', [turno]);
+  assert.deepEqual(rows.map(fila => fila.estado), ['confirmada', 'en_lista_de_espera']);
 });

@@ -68,7 +68,13 @@ Keycloak importa `auth/keycloak/realm-colonia.json` solo si el volumen `colonia_
 - `cola`: RabbitMQ, sin puerto publicado, con healthcheck y volumen `colonia_rabbitmq`. La API publica y consume la cola durable `colonia.residencia` por el exchange por defecto: un mensaje lo toma un solo consumidor.
 - `swagger-ui`: muestra `openapi.yaml`, se autoriza contra Keycloak y reenvía `/api/` al gateway.
 
-El padrón provincial está simulado dentro de la API: un DNI que termina en `0` no reside en la jurisdicción de la convocatoria; el resto sí. Cada consulta, también un reintento, toma un cupo de la tabla `colonia.consultas_padron`. El tope es **50 por segundo en total**, compartido por todos los procesos de la API. Si la consulta falla, la inscripción sigue en `pendiente_de_validacion` y el mensaje se vuelve a encolar.
+El padrón provincial está simulado dentro de la API: un DNI que termina en `0` no reside en la jurisdicción de la convocatoria; el resto sí. Cada consulta, también un reintento, toma un cupo de la tabla `colonia.consultas_padron`. El regulador actual usa **segundos fijos**, con un tope configurado de 50 compartido por todos los procesos de la API; todavía no garantiza 50 en cualquier ventana móvil de un segundo. Si la consulta falla, la inscripción sigue en `pendiente_de_validacion` y el mensaje se vuelve a encolar.
+
+La integración está separada en `padron-limite.js` (permisos globales en PostgreSQL), `padron-cliente.js` (esperar permiso y consultar) y `padron-simulado.js` (adaptador de residencia). `padron.js` compone esas piezas y conserva la función `consultarPadron` usada por las rutas y el consumidor. El adaptador recibe documento y jurisdicción, devuelve `true`/`false` o lanza un error técnico; una respuesta inválida también es error, nunca rechazo por residencia.
+
+Las pruebas crean instancias del simulador con una secuencia de escenarios: `{ demoraMs: 500 }`, `{ error: 'NO_DISPONIBLE' }` o `{ error: 'SATURADO', reintentarEnMs: 2500 }`. Se consumen por orden de inicio de llamada, sin azar ni configuración global; al agotarse vuelve la regla normal del DNI. Se puede inyectar una espera controlada para liberar la respuesta desde la prueba sin dormir realmente. La demo usa una instancia sin escenarios de falla y no expone endpoints para activarlos.
+
+`SATURADO` simula el rechazo externo por tasa (equivalente a HTTP 429), distinto de `LIMITE_LOCAL` al agotar el presupuesto de espera del regulador. `reintentarEnMs` es información disponible para la futura política de reintentos: el consumidor todavía conserva su reencolado actual. `esperaMaximaMs` limita únicamente la espera de permiso; el timeout de la consulta externa y el backoff se implementarán en el paso 8. La ventana móvil del regulador corresponde al paso 5.
 
 Las conexiones **entre servicios** usan nombres DNS de Compose. `localhost` se usa solo en las URLs del navegador; el healthcheck de la API usa loopback para comprobar el propio contenedor, no para conectarse a otro servicio.
 
@@ -122,7 +128,7 @@ Flujo funcional:
 
 1. El tutor elige un turno. El sistema comprueba datos, edad, período abierto y ausencia de inscripción activa en la convocatoria. Estas validaciones y la unicidad deben mantenerse también con solicitudes concurrentes.
 2. La admisión bloquea el turno antes de generar el orden y guarda durablemente la solicitud y un mensaje en `colonia.salida`, en la misma transacción. Comprueba las fechas vigentes del turno y toma la hora de PostgreSQL después de obtener ese bloqueo. Se responde `202 Accepted` con estado `pendiente_de_validacion`, `ordenRecepcion` y la ubicación para consultar el resultado. Esto no confirma un cupo. Si RabbitMQ no está, el mensaje queda en la bandeja y se publica cuando el broker vuelve.
-3. La cola procesa la validación de residencia sin superar **50 consultas por segundo en total**, aunque existan varios consumidores. Una falla técnica mantiene la solicitud pendiente para reintentar; no equivale a un rechazo.
+3. La cola procesa la validación de residencia con el regulador global configurado en **50 consultas por segundo fijo**, aunque existan varios consumidores. Una falla técnica mantiene la solicitud pendiente para reintentar; no equivale a un rechazo.
 4. Si reside en la jurisdicción, se asigna cupo de forma transaccional respetando el orden. Queda `confirmada` si corresponde una plaza, o `en_lista_de_espera` si no alcanza el cupo. Si el padrón determina que no reside, queda `rechazada`, con motivo.
 5. Una respuesta rápida del padrón no permite adelantar solicitudes anteriores pendientes del mismo turno. La asignación posterior de ese turno espera su resolución; no se implementan reservas temporales ni plazos de corrección. Los otros turnos pueden continuar. Esta elección protege la equidad a costa de demorar confirmaciones si el padrón falla.
 6. Al aumentar el cupo o cancelar una confirmada, se continúa asignando en orden. Cancelar una pendiente o una inscripción en espera no libera una plaza ocupada. Una solicitud cancelada no puede confirmarse por un resultado tardío del padrón.
@@ -206,6 +212,14 @@ Fuerzan una pausa antes de que la primera inscripción sea visible y comprueban 
 
 La misma suite también prueba reintentos idempotentes concurrentes, conflictos de contenido, aislamiento por tutor, respuesta original después de cancelación/cierre, validación del header y rollback completo ante una falla del outbox.
 
+Además, ejecuta el procesador real `resolverInscripcion` con un cliente de padrón inyectado y permisos reales de PostgreSQL. Verifica errores transitorios, saturación, conservación del orden, consumo de permiso en cada intento y una respuesta lenta que no permite adelantar a otra inscripción. Estas pruebas invocan explícitamente cada intento; no demuestran todavía recuperación automática ni backoff del broker.
+
+Las pruebas del cliente y del simulador no necesitan Docker, credenciales ni PostgreSQL:
+
+```powershell
+node --test api/test/padron.test.mjs
+```
+
 Para verificar CORS y el reenvío de la clave en el gateway con JWT/JWKS de prueba y una API simulada, sin iniciar Keycloak ni modificar datos:
 
 ```powershell
@@ -227,7 +241,7 @@ docker compose -f docker-compose.yml -f docker-compose.auth.yml run --rm --no-de
 - [x] 401 y 403 con Problem Details, y `securitySchemes` en `openapi.yaml`.
 - [x] La API no publica puerto. La contraseña de admin de Keycloak está en `.env`.
 - [x] Turnos e inscripciones persistidos en PostgreSQL, con migraciones y pruebas de contrato.
-- [x] Cola y padrón simulado con tope de 50 consultas por segundo; asignación de cupo en orden.
+- [x] Cola y padrón simulado con regulador global de 50 consultas por segundo fijo; asignación de cupo en orden.
 
 La guía original se conserva en `docs/clase10-original.md`. El BFF mobile del ejemplo no forma parte del Compose de colonia; su código se conserva como referencia en `docs/template-bff-mobile/`.
 
