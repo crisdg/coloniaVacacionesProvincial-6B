@@ -93,6 +93,14 @@ Operaciones de inscripciones:
 - `PATCH /inscripciones/{id}`: corregir datos del mismo chico, sin cambiar turno, estado ni orden (administrador). Si cambia el DNI, el padrón se consulta antes de aceptar: sin residencia responde 409 y el DNI anterior queda igual; si el padrón no responde, 503.
 - `POST /inscripciones/{id}/cancelaciones`: cancelar con motivo obligatorio (administrador).
 
+`POST /inscripciones` acepta el header opcional `Idempotency-Key` (de 1 a 128 caracteres: letras ASCII, números, `.`, `_`, `:`, `-`). El cliente genera una clave por solicitud, por ejemplo un UUID, y la conserva si pierde la respuesta o necesita reintentar. El gateway permite y reenvía ese header.
+
+La clave se asocia al tutor autenticado y al contenido validado de la solicitud. La misma clave con los mismos datos normalizados devuelve el `202`, cuerpo y `Location` originales, incluidos `id` y `ordenRecepcion`; otros datos con esa clave devuelven `409`. El orden de los campos JSON no importa y los textos se comparan después del recorte de espacios de la validación habitual. Una clave inválida devuelve `400`.
+
+La reserva de clave, inscripción, outbox y respuesta original se guardan en una sola transacción. La clave primaria `(tutor_id, clave)` coordina reintentos concurrentes entre réplicas antes de bloquear el turno. Si la operación falla, todo se revierte y la clave puede reintentarse. Las aceptaciones se conservan sin expiración automática: esa persistencia consume espacio, pero evita que un reintento tardío se interprete como una nueva admisión. No se eliminan claves en este avance.
+
+El reintento recupera la aceptación original incluso si cerró el período o la inscripción fue corregida, confirmada, rechazada o cancelada. Para el estado actual se usa `GET /inscripciones/{id}`. Una solicitud nueva después de cancelación o rechazo usa otra clave. Sin header se mantiene el comportamiento anterior: otro POST para un DNI activo devuelve `409`. Una clave distinta nunca permite eludir la unicidad por DNI y convocatoria.
+
 Operación técnica:
 
 - `GET /health`: responde 200 si API y PostgreSQL están disponibles, o 503 si falla la comprobación de la base.
@@ -195,6 +203,14 @@ docker compose -f docker-compose.yml -f docker-compose.auth.yml run --rm --no-de
 ```
 
 Fuerzan una pausa antes de que la primera inscripción sea visible y comprueban prioridad, independencia entre turnos y revalidación del período ante un cambio concurrente. Ejecutan rutas y asignador reales; no inician el consumidor de RabbitMQ y simulan residencia favorable para aislar la coordinación transaccional.
+
+La misma suite también prueba reintentos idempotentes concurrentes, conflictos de contenido, aislamiento por tutor, respuesta original después de cancelación/cierre, validación del header y rollback completo ante una falla del outbox.
+
+Para verificar CORS y el reenvío de la clave en el gateway con JWT/JWKS de prueba y una API simulada, sin iniciar Keycloak ni modificar datos:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.auth.yml run --rm --no-deps -v ./auth/gateway/src:/app/src:ro -v ./auth/gateway/test:/app/test:ro gateway node --test test/idempotencia.test.mjs
+```
 
 ## Checklist del avance
 

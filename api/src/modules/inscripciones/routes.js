@@ -7,6 +7,7 @@ import { documento, entero, fecha, idDeRuta, texto, validarObjeto } from '../../
 import { asignarTurno } from './asignacion.js';
 import { registrarSalida } from './cola.js';
 import { consultarPadron, motivoFueraDeJurisdiccion } from './padron.js';
+import { conIdempotencia, validarClaveIdempotencia } from './idempotencia.js';
 
 const EDAD_MINIMA = 6;
 const EDAD_MAXIMA = 12;
@@ -58,39 +59,41 @@ async function buscarAccesible(id, usuario, db = pool, { bloquear = false } = {}
 const router = Router();
 
 router.post('/', async (req, res) => {
+  const clave = validarClaveIdempotencia(req.get('Idempotency-Key'));
   const { turnoId, chico } = validarObjeto(
     req.body,
     { turnoId: entero(1), chico: validarChico },
     { requeridos: ['turnoId', 'chico'] },
   );
   try {
-    const fila = await enTransaccion(async (client) => {
-      // Mismo lock que asignación, cancelación y cambios de cupo. Se toma ANTES
-      // de generar el orden: ninguna asignación puede omitir esta admisión en curso.
-      const { rows: turnos } = await client.query(
-        `SELECT convocatoria_id, inscripcion_abre_en, inscripcion_cierra_en
-         FROM colonia.turnos WHERE id = $1 FOR UPDATE`,
-        [turnoId],
-      );
-      const turno = turnos[0];
-      if (!turno) throw noEncontrado(`No existe el turno ${turnoId}.`);
-      // Se evalúa después de esperar el lock; now() devolvería el inicio de la transacción.
-      const { rows: [{ recibida_en: recibidaEn }] } = await client.query('SELECT clock_timestamp() AS recibida_en');
-      if (recibidaEn < turno.inscripcion_abre_en || recibidaEn >= turno.inscripcion_cierra_en) {
-        throw conflicto('El período de inscripción del turno no está abierto.');
-      }
-      validarEdad(chico.fechaNacimiento, fechaEnArgentina(recibidaEn));
-      const { rows } = await client.query(
-        `INSERT INTO colonia.inscripciones
-           (turno_id, convocatoria_id, tutor_id, documento, nombre, apellido, fecha_nacimiento, creado_en)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-        [turnoId, turno.convocatoria_id, req.usuario.id, chico.documento, chico.nombre, chico.apellido,
-          chico.fechaNacimiento, recibidaEn],
-      );
-      await registrarSalida(client, rows[0].id);
-      return rows[0];
-    });
-    const inscripcion = aInscripcion(fila);
+    const inscripcion = await enTransaccion((client) => conIdempotencia(
+      client, req.usuario.id, clave, { turnoId, chico }, async () => {
+        // Mismo lock que asignación, cancelación y cambios de cupo. Se toma ANTES
+        // de generar el orden: ninguna asignación puede omitir esta admisión en curso.
+        const { rows: turnos } = await client.query(
+          `SELECT convocatoria_id, inscripcion_abre_en, inscripcion_cierra_en
+           FROM colonia.turnos WHERE id = $1 FOR UPDATE`,
+          [turnoId],
+        );
+        const turno = turnos[0];
+        if (!turno) throw noEncontrado(`No existe el turno ${turnoId}.`);
+        // Se evalúa después de esperar el lock; now() devolvería el inicio de la transacción.
+        const { rows: [{ recibida_en: recibidaEn }] } = await client.query('SELECT clock_timestamp() AS recibida_en');
+        if (recibidaEn < turno.inscripcion_abre_en || recibidaEn >= turno.inscripcion_cierra_en) {
+          throw conflicto('El período de inscripción del turno no está abierto.');
+        }
+        validarEdad(chico.fechaNacimiento, fechaEnArgentina(recibidaEn));
+        const { rows } = await client.query(
+          `INSERT INTO colonia.inscripciones
+             (turno_id, convocatoria_id, tutor_id, documento, nombre, apellido, fecha_nacimiento, creado_en)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+          [turnoId, turno.convocatoria_id, req.usuario.id, chico.documento, chico.nombre, chico.apellido,
+            chico.fechaNacimiento, recibidaEn],
+        );
+        await registrarSalida(client, rows[0].id);
+        return aInscripcion(rows[0]);
+      },
+    ));
     res.status(202).location(`inscripciones/${inscripcion.id}`).json(inscripcion);
   } catch (error) {
     if (esInscripcionActivaDuplicada(error)) throw conflicto(DUPLICADA);

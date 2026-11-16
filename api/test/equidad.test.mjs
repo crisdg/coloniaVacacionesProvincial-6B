@@ -68,18 +68,19 @@ async function crearTurno() {
   return rows[0].id;
 }
 
-async function solicitar(turnoId, documento, tutor = 'tutor-equidad') {
+async function solicitar(turnoId, documento, tutor = 'tutor-equidad', { clave, chico = {} } = {}) {
   const nacimiento = new Date();
   nacimiento.setUTCFullYear(nacimiento.getUTCFullYear() - 8);
   const respuesta = await fetch(`${baseURL}/inscripciones`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Usuario-Id': tutor, 'X-Usuario-Roles': 'tutor' },
+    headers: { 'Content-Type': 'application/json', 'X-Usuario-Id': tutor, 'X-Usuario-Roles': 'tutor',
+      ...(clave !== undefined && { 'Idempotency-Key': clave }) },
     body: JSON.stringify({ turnoId, chico: {
-      documento, nombre: 'Ana', apellido: 'Prueba', fechaNacimiento: nacimiento.toISOString().slice(0, 10),
+      documento, nombre: 'Ana', apellido: 'Prueba', fechaNacimiento: nacimiento.toISOString().slice(0, 10), ...chico,
     } }),
     signal: AbortSignal.timeout(5000),
   });
-  return { status: respuesta.status, body: await respuesta.json() };
+  return { status: respuesta.status, location: respuesta.headers.get('location'), body: await respuesta.json() };
 }
 
 test('una admisión pausada antes de ser visible conserva prioridad y no bloquea otros turnos', async () => {
@@ -183,4 +184,111 @@ test('la admisión comprueba el período vigente después de esperar el bloqueo 
     if (solicitud) await Promise.allSettled([solicitud]);
     await editor.end();
   }
+});
+
+test('reintentos concurrentes conservan respuesta, orden y un único mensaje de salida', async () => {
+  const turno = await crearTurno();
+  const respuestas = await Promise.all(Array.from({ length: 5 }, () => (
+    solicitar(turno, '92000001', 'tutor-idempotente', { clave: 'concurrente-1' })
+  )));
+  for (const respuesta of respuestas) {
+    assert.equal(respuesta.status, 202, JSON.stringify(respuesta.body));
+    assert.deepEqual(respuesta, respuestas[0]);
+  }
+  const { rows } = await pool.query(`SELECT
+    (SELECT count(*)::int FROM colonia.inscripciones WHERE turno_id = $1) AS inscripciones,
+    (SELECT count(*)::int FROM colonia.salida WHERE inscripcion_id = $2) AS mensajes,
+    (SELECT count(*)::int FROM colonia.solicitudes_idempotentes WHERE tutor_id = $3) AS claves`,
+  [turno, respuestas[0].body.id, 'tutor-idempotente']);
+  assert.deepEqual(rows[0], { inscripciones: 1, mensajes: 1, claves: 1 });
+});
+
+test('la misma clave con otros datos o turno da 409; los datos normalizados equivalentes se reutilizan', async () => {
+  const turno = await crearTurno();
+  const otroTurno = await crearTurno();
+  const original = await solicitar(turno, '92000002', 'tutor-conflicto', { clave: 'misma-clave' });
+  assert.equal(original.status, 202);
+  const equivalente = await solicitar(turno, '92000002', 'tutor-conflicto', {
+    clave: 'misma-clave', chico: { nombre: ' Ana ' },
+  });
+  assert.deepEqual(equivalente, original);
+  const cambiado = await solicitar(turno, '92000002', 'tutor-conflicto', {
+    clave: 'misma-clave', chico: { nombre: 'Otro nombre' },
+  });
+  assert.equal(cambiado.status, 409);
+  const otro = await solicitar(otroTurno, '92000002', 'tutor-conflicto', { clave: 'misma-clave' });
+  assert.equal(otro.status, 409);
+});
+
+test('la misma clave concurrente en turnos distintos admite una sola solicitud', async () => {
+  const primero = await crearTurno();
+  const segundo = await crearTurno();
+  const respuestas = await Promise.all([
+    solicitar(primero, '92000008', 'tutor-dos-turnos', { clave: 'unica' }),
+    solicitar(segundo, '92000009', 'tutor-dos-turnos', { clave: 'unica' }),
+  ]);
+  assert.deepEqual(respuestas.map(r => r.status).sort(), [202, 409]);
+  const { rows } = await pool.query(`SELECT count(*)::int AS n FROM colonia.inscripciones
+    WHERE tutor_id = 'tutor-dos-turnos'`);
+  assert.equal(rows[0].n, 1);
+});
+
+test('la clave pertenece al tutor y no permite eludir la unicidad del DNI', async () => {
+  const turno = await crearTurno();
+  const original = await solicitar(turno, '92000003', 'tutor-uno', { clave: 'compartida' });
+  assert.equal(original.status, 202);
+  const ajena = await solicitar(turno, '92000003', 'tutor-dos', { clave: 'compartida' });
+  assert.equal(ajena.status, 409);
+  assert.equal((await solicitar(turno, '92000003', 'tutor-uno', { clave: 'otra' })).status, 409);
+  assert.equal((await solicitar(turno, '92000003', 'tutor-uno')).status, 409);
+  const propia = await solicitar(turno, '92000004', 'tutor-dos', { clave: 'compartida' });
+  assert.equal(propia.status, 202);
+  assert.notEqual(propia.body.id, original.body.id);
+});
+
+test('el reintento devuelve la aceptación original aunque se cancele o cierre el período; GET muestra el estado actual', async () => {
+  const turno = await crearTurno();
+  const original = await solicitar(turno, '92000005', 'tutor-replay', { clave: 'estable' });
+  assert.equal(original.status, 202);
+  await pool.query(`UPDATE colonia.inscripciones SET estado = 'cancelada', motivo_cancelacion = 'Prueba'
+    WHERE id = $1`, [original.body.id]);
+  await pool.query(`UPDATE colonia.turnos SET inscripcion_cierra_en = clock_timestamp() - interval '1 hour' WHERE id = $1`, [turno]);
+  assert.deepEqual(await solicitar(turno, '92000005', 'tutor-replay', { clave: 'estable' }), original);
+  const actual = await fetch(`${baseURL}/inscripciones/${original.body.id}`, {
+    headers: { 'X-Usuario-Id': 'tutor-replay', 'X-Usuario-Roles': 'tutor' },
+  });
+  assert.equal((await actual.json()).estado, 'cancelada');
+  await pool.query(`UPDATE colonia.turnos SET inscripcion_cierra_en = clock_timestamp() + interval '1 day' WHERE id = $1`, [turno]);
+  const nueva = await solicitar(turno, '92000005', 'tutor-replay', { clave: 'nueva-solicitud' });
+  assert.equal(nueva.status, 202);
+  assert.ok(nueva.body.ordenRecepcion > original.body.ordenRecepcion);
+});
+
+test('una falla al guardar el outbox revierte inscripción y clave, y permite reintentar', async () => {
+  const turno = await crearTurno();
+  await pool.query(`CREATE FUNCTION colonia.fallar_salida() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN RAISE EXCEPTION 'Falla controlada del outbox'; END $$`);
+  await pool.query(`CREATE TRIGGER fallar_salida BEFORE INSERT ON colonia.salida
+    FOR EACH ROW EXECUTE FUNCTION colonia.fallar_salida()`);
+  try {
+    const fallida = await solicitar(turno, '92000006', 'tutor-rollback', { clave: 'recuperable' });
+    assert.equal(fallida.status, 500);
+    const { rows } = await pool.query(`SELECT
+      (SELECT count(*)::int FROM colonia.inscripciones WHERE turno_id = $1) AS inscripciones,
+      (SELECT count(*)::int FROM colonia.solicitudes_idempotentes WHERE tutor_id = 'tutor-rollback') AS claves`, [turno]);
+    assert.deepEqual(rows[0], { inscripciones: 0, claves: 0 });
+  } finally {
+    await pool.query('DROP TRIGGER fallar_salida ON colonia.salida');
+    await pool.query('DROP FUNCTION colonia.fallar_salida()');
+  }
+  assert.equal((await solicitar(turno, '92000006', 'tutor-rollback', { clave: 'recuperable' })).status, 202);
+});
+
+test('claves vacías, inválidas o demasiado largas devuelven 400 sin crear una inscripción', async () => {
+  const turno = await crearTurno();
+  for (const clave of ['', 'con espacios', 'a'.repeat(129)]) {
+    assert.equal((await solicitar(turno, '92000007', 'tutor-validacion', { clave })).status, 400);
+  }
+  const { rows } = await pool.query('SELECT count(*)::int AS n FROM colonia.inscripciones WHERE turno_id = $1', [turno]);
+  assert.equal(rows[0].n, 0);
 });

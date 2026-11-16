@@ -162,6 +162,17 @@ paths:
       operationId: "crearInscripcion"
       summary: "Inscribir a un chico en un turno"
       description: "Rol: tutor. El tutor sale del token. Requiere período abierto (apertura inclusiva y cierre exclusivo; si no, 409) y edad de 6 a 12 años inclusive al registrar la solicitud, con la fecha del servidor en America/Argentina/Buenos_Aires (si no, 400). Una sola inscripción activa por DNI y convocatoria, incluso entre turnos y sedes diferentes y con pedidos concurrentes (si no, 409). La convocatoria se obtiene del turno. Responde 202 con estado pendiente_de_validacion y el orden de recepción; todavía no confirma cupo. Una nueva solicitud tras cancelación o rechazo recibe nuevo orden. Confirma solo a quien reside en la jurisdicción y no adelanta solicitudes anteriores pendientes del mismo turno. Una falla técnica deja la solicitud pendiente."
+      parameters:
+        - name: "Idempotency-Key"
+          in: "header"
+          required: false
+          description: "Clave generada por el cliente para esta solicitud y reutilizada en sus reintentos. Se asocia al tutor autenticado. Misma clave y datos normalizados devuelve el 202, cuerpo y Location originales, incluso si cambió el estado o cerró el período; consultar GET para el estado actual. Misma clave con otros datos devuelve 409. Los errores no guardan la clave. Sin este header se mantiene la unicidad por DNI, pero no se recupera la respuesta original. Una nueva solicitud tras cancelación o rechazo requiere una clave nueva. Las claves aceptadas no expiran automáticamente."
+          schema:
+            type: "string"
+            minLength: 1
+            maxLength: 128
+            pattern: "^[A-Za-z0-9._:-]{1,128}$"
+          example: "d42a7862-2a20-44d8-85e0-f0ea516ac77c"
       requestBody:
         required: true
         content:
@@ -170,7 +181,7 @@ paths:
               "$ref": "#/components/schemas/InscripcionNueva"
       responses:
         "202":
-          description: "Solicitud recibida y persistida, pendiente de validar residencia; todavía no confirma cupo."
+          description: "Aceptación original persistida, pendiente de validar residencia; todavía no confirma cupo. Un reintento idempotente reproduce esta respuesta, no el estado actual de la inscripción."
           content:
             application/json:
               schema:
@@ -652,7 +663,7 @@ components:
             detail: "El recurso no existe."
             instance: "/turnos"
     Conflicto:
-      description: "Ya existe una inscripción activa del chico en la convocatoria, inscripción en estado final, período cerrado o cupo inferior a los confirmados. La falta de cupo genera lista de espera, no conflicto."
+      description: "Ya existe una inscripción activa del chico en la convocatoria, inscripción en estado final, período cerrado, cupo inferior a los confirmados o Idempotency-Key reutilizada con otros datos. La falta de cupo genera lista de espera, no conflicto."
       content:
         "application/problem+json":
           schema:
