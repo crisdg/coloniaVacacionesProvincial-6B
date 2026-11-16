@@ -12,7 +12,7 @@ app.use(express.json());
 app.get('/health', async (req, res) => {
   try {
     await pool.query('SELECT 1');
-    res.json({ status: 'ok', database: 'ok', stage: 'esqueleto' });
+    res.json({ status: 'ok', database: 'ok' });
   } catch {
     problem(req, res, 503, 'Servicio no disponible', 'No se pudo comprobar la conexión con PostgreSQL.');
   }
