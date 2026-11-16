@@ -17,4 +17,3 @@ export const noAutenticado = (detail) => new ErrorHttp(401, 'No autenticado', de
 export const noEncontrado = (detail) => new ErrorHttp(404, 'No encontrado', detail);
 export const conflicto = (detail) => new ErrorHttp(409, 'Conflicto', detail);
 export const noDisponible = (detail) => new ErrorHttp(503, 'Servicio no disponible', detail);
-export const pendiente = (detail) => new ErrorHttp(501, 'Funcionalidad pendiente', detail);
