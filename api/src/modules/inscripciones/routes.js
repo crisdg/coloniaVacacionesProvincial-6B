@@ -63,19 +63,23 @@ router.post('/', async (req, res) => {
     { turnoId: entero(1), chico: validarChico },
     { requeridos: ['turnoId', 'chico'] },
   );
-  const { rows: turnos } = await pool.query(
-    'SELECT convocatoria_id, inscripcion_abre_en, inscripcion_cierra_en FROM colonia.turnos WHERE id = $1',
-    [turnoId],
-  );
-  const turno = turnos[0];
-  if (!turno) throw noEncontrado(`No existe el turno ${turnoId}.`);
-  const recibidaEn = new Date();
-  if (recibidaEn < turno.inscripcion_abre_en || recibidaEn >= turno.inscripcion_cierra_en) {
-    throw conflicto('El período de inscripción del turno no está abierto.');
-  }
-  validarEdad(chico.fechaNacimiento, fechaEnArgentina(recibidaEn));
   try {
     const fila = await enTransaccion(async (client) => {
+      // Mismo lock que asignación, cancelación y cambios de cupo. Se toma ANTES
+      // de generar el orden: ninguna asignación puede omitir esta admisión en curso.
+      const { rows: turnos } = await client.query(
+        `SELECT convocatoria_id, inscripcion_abre_en, inscripcion_cierra_en
+         FROM colonia.turnos WHERE id = $1 FOR UPDATE`,
+        [turnoId],
+      );
+      const turno = turnos[0];
+      if (!turno) throw noEncontrado(`No existe el turno ${turnoId}.`);
+      // Se evalúa después de esperar el lock; now() devolvería el inicio de la transacción.
+      const { rows: [{ recibida_en: recibidaEn }] } = await client.query('SELECT clock_timestamp() AS recibida_en');
+      if (recibidaEn < turno.inscripcion_abre_en || recibidaEn >= turno.inscripcion_cierra_en) {
+        throw conflicto('El período de inscripción del turno no está abierto.');
+      }
+      validarEdad(chico.fechaNacimiento, fechaEnArgentina(recibidaEn));
       const { rows } = await client.query(
         `INSERT INTO colonia.inscripciones
            (turno_id, convocatoria_id, tutor_id, documento, nombre, apellido, fecha_nacimiento, creado_en)

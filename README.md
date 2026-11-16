@@ -113,13 +113,15 @@ Implementado: roles, titularidad, edad, período, unicidad por DNI y convocatori
 Flujo funcional:
 
 1. El tutor elige un turno. El sistema comprueba datos, edad, período abierto y ausencia de inscripción activa en la convocatoria. Estas validaciones y la unicidad deben mantenerse también con solicitudes concurrentes.
-2. Se guarda durablemente la solicitud, su orden de recepción y un mensaje en `colonia.salida`, en la misma transacción. Se responde `202 Accepted` con estado `pendiente_de_validacion` y la ubicación para consultar el resultado. Esto no confirma un cupo. Si RabbitMQ no está, el mensaje queda en la bandeja y se publica cuando el broker vuelve.
+2. La admisión bloquea el turno antes de generar el orden y guarda durablemente la solicitud y un mensaje en `colonia.salida`, en la misma transacción. Comprueba las fechas vigentes del turno y toma la hora de PostgreSQL después de obtener ese bloqueo. Se responde `202 Accepted` con estado `pendiente_de_validacion`, `ordenRecepcion` y la ubicación para consultar el resultado. Esto no confirma un cupo. Si RabbitMQ no está, el mensaje queda en la bandeja y se publica cuando el broker vuelve.
 3. La cola procesa la validación de residencia sin superar **50 consultas por segundo en total**, aunque existan varios consumidores. Una falla técnica mantiene la solicitud pendiente para reintentar; no equivale a un rechazo.
 4. Si reside en la jurisdicción, se asigna cupo de forma transaccional respetando el orden. Queda `confirmada` si corresponde una plaza, o `en_lista_de_espera` si no alcanza el cupo. Si el padrón determina que no reside, queda `rechazada`, con motivo.
 5. Una respuesta rápida del padrón no permite adelantar solicitudes anteriores pendientes del mismo turno. La asignación posterior de ese turno espera su resolución; no se implementan reservas temporales ni plazos de corrección. Los otros turnos pueden continuar. Esta elección protege la equidad a costa de demorar confirmaciones si el padrón falla.
 6. Al aumentar el cupo o cancelar una confirmada, se continúa asignando en orden. Cancelar una pendiente o una inscripción en espera no libera una plaza ocupada. Una solicitud cancelada no puede confirmarse por un resultado tardío del padrón.
 
 Estados: `pendiente_de_validacion`, `confirmada`, `en_lista_de_espera`, `rechazada` y `cancelada`. Los dos últimos son finales.
+
+La prioridad se define en la admisión al sistema, no en el clic del navegador ni en la llegada al gateway. Dentro de un turno, recepción, asignación, cancelación y cambios de cupo usan el mismo bloqueo: una solicitud posterior no puede obtener una plaza mientras una anterior con orden asignado todavía se está guardando. El bloqueo dura hasta commit o rollback y nunca abarca la consulta al padrón. Otros turnos pueden avanzar independientemente. `ordenRecepcion` es global e inmutable, puede tener saltos y no representa la posición actual en la lista de espera. Si el período cierra mientras una solicitud espera el bloqueo de admisión, se rechaza con 409.
 
 Las correcciones administrativas corresponden al mismo chico y conservan identificador, turno, convocatoria y orden original. Vuelven a comprobar la edad a la **fecha original de inscripción**. Si cambia el DNI, la residencia se valida antes de aceptar el cambio. No permiten cambiar libremente el estado ni corregir una inscripción cancelada o rechazada.
 
@@ -185,6 +187,14 @@ docker compose -f docker-compose.yml -f docker-compose.auth.yml run --rm --no-de
 ```
 
 Cubren alta y actualización de turnos, alta de inscripciones, unicidad con pedidos concurrentes, titularidad, corrección, cancelación, rechazo por residencia, lista de espera, promoción por cupo o cancelación, el orden de asignación y los errores 400, 404 y 409.
+
+Las pruebas de concurrencia de admisión usan las fuentes locales y una base temporal que se crea y elimina automáticamente (requieren permiso `CREATEDB`, disponible con el usuario del Compose local):
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.auth.yml run --rm --no-deps -v ./api/src:/app/src:ro -v ./api/test:/app/test:ro -v ./api/migrations:/app/migrations:ro api node --test test/equidad.test.mjs
+```
+
+Fuerzan una pausa antes de que la primera inscripción sea visible y comprueban prioridad, independencia entre turnos y revalidación del período ante un cambio concurrente. Ejecutan rutas y asignador reales; no inician el consumidor de RabbitMQ y simulan residencia favorable para aislar la coordinación transaccional.
 
 ## Checklist del avance
 

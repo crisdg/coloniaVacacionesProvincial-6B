@@ -544,7 +544,7 @@ components:
         ordenRecepcion:
           type: "integer"
           minimum: 1
-          description: "Orden inmutable de recepción durable en el servidor, asignado antes de consultar el padrón. Se usa para asignar plazas dentro del turno sin adelantar solicitudes anteriores pendientes. No es la posición actual en espera."
+          description: "Orden global e inmutable de admisión durable, generado bajo el bloqueo del turno antes de consultar el padrón. Puede tener saltos. Se usa para asignar plazas dentro del turno sin adelantar solicitudes anteriores pendientes o todavía en proceso de persistencia. No representa el momento del clic, la llegada al gateway ni la posición actual en espera."
         creadoEn:
           type: "string"
           format: "date-time"
