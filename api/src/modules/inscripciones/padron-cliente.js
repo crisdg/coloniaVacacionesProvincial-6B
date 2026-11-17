@@ -1,4 +1,5 @@
 import { VIGENCIA_PERMISO_MS } from './padron-config.js';
+import { conTimeout, esperarPadron, TIMEOUT_CONSULTA_MS } from './padron-reintentos.js';
 
 export class ErrorPadron extends Error {
   constructor(mensaje, { codigo = 'NO_DISPONIBLE', reintentarEnMs } = {}) {
@@ -14,26 +15,32 @@ export class ErrorPadron extends Error {
 export function crearConsultaPadron({
   reservarConsulta,
   consultarResidencia,
-  esperar = (ms) => new Promise(resolve => setTimeout(resolve, ms)),
+  esperar = esperarPadron,
   ahora = () => performance.now(),
 }) {
-  return async function consultarPadron(documento, jurisdiccion, { esperaMaximaMs = Infinity } = {}) {
+  return async function consultarPadron(documento, jurisdiccion, {
+    esperaMaximaMs = Infinity, timeoutMs = TIMEOUT_CONSULTA_MS, signal,
+  } = {}) {
     if (typeof jurisdiccion !== 'string' || jurisdiccion.trim() === '') {
       throw new ErrorPadron('La convocatoria no tiene jurisdicción.', { codigo: 'JURISDICCION_INVALIDA' });
     }
     const inicio = ahora();
     for (;;) {
+      signal?.throwIfAborted();
       // Medir desde ANTES de pedir permiso es conservador: incluye red, espera
       // del lock y commit. No se comparan relojes de distintos servidores.
       const inicioReserva = ahora();
       const esperaMs = await reservarConsulta();
+      signal?.throwIfAborted();
       const transcurrido = ahora() - inicio;
       if (transcurrido > esperaMaximaMs) {
         throw new ErrorPadron('Se alcanzó el tope de consultas al padrón.', { codigo: 'LIMITE_LOCAL' });
       }
       if (esperaMs === 0 && ahora() - inicioReserva < VIGENCIA_PERMISO_MS) {
         // Iniciar directamente: no agregar awaits entre la vigencia y el adaptador.
-        const residente = await consultarResidencia(documento, jurisdiccion);
+        const residente = await conTimeout(
+          signalConsulta => consultarResidencia(documento, jurisdiccion, { signal: signalConsulta }), timeoutMs, signal,
+        );
         if (typeof residente !== 'boolean') {
           throw new ErrorPadron('El padrón devolvió una respuesta inválida.', { codigo: 'RESPUESTA_INVALIDA' });
         }
@@ -44,7 +51,7 @@ export function crearConsultaPadron({
       if (transcurrido + demora > esperaMaximaMs) {
         throw new ErrorPadron('Se alcanzó el tope de consultas al padrón.', { codigo: 'LIMITE_LOCAL' });
       }
-      await esperar(demora);
+      await esperar(demora, signal);
     }
   };
 }

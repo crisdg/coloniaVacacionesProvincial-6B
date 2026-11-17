@@ -113,6 +113,8 @@ test('una falla del padrón libera la inscripción para otro intento', async () 
   await assert.rejects(resolverInscripcion(id, async () => { throw new Error('Padrón caído'); }), /Padrón caído/);
   const despues = await estado();
   assert.deepEqual(despues.map(({ version, ...fila }) => fila), antes.map(({ version, ...fila }) => fila));
+  assert.equal(await resolverInscripcion(id, () => assert.fail('Todavía no vence la espera')), false);
+  await vencerEspera(id);
   assert.equal(await resolverInscripcion(id, async () => true), true);
   assert.equal((await estado())[0].estado, 'confirmada');
 });
@@ -135,6 +137,7 @@ test('si falla la asignación no se guarda un resultado parcial y la reentrega p
     await pool.query('DROP TRIGGER fallar_asignacion ON colonia.inscripciones');
     await pool.query('DROP FUNCTION colonia.fallar_asignacion()');
   }
+  await vencerEspera(id);
   assert.equal(await resolverInscripcion(id, consultar), true);
   assert.equal(consultas, 2, 'Sin commit se puede repetir la consulta externa.');
   assert.equal((await estado())[0].estado, 'confirmada');
@@ -146,7 +149,7 @@ test('al morir el consumidor otra réplica retoma la inscripción', { timeout: 1
   hijo.kill('SIGKILL');
   await salida;
   assert.equal(await resolverInscripcion(id, () => assert.fail('Reclamación vigente')), false);
-  await pool.query("UPDATE colonia.inscripciones SET padron_reclamado_hasta = clock_timestamp() - interval '1 second' WHERE id = $1", [id]);
+  await pool.query("UPDATE colonia.inscripciones SET padron_proximo_intento_en = clock_timestamp() - interval '1 second', padron_reclamado_hasta = clock_timestamp() - interval '1 second' WHERE id = $1", [id]);
   const limite = Date.now() + 2000;
   let resuelta;
   do {
@@ -165,7 +168,7 @@ test('una reclamación vencida puede recuperarse y el dueño viejo no sobrescrib
   const anterior = resolverInscripcion(id, async () => { inicio.resolve(); await continuar.promise; return true; });
   try {
     await inicio.promise;
-    await pool.query("UPDATE colonia.inscripciones SET padron_reclamado_hasta = clock_timestamp() - interval '1 second' WHERE id = $1", [id]);
+    await pool.query("UPDATE colonia.inscripciones SET padron_proximo_intento_en = clock_timestamp() - interval '1 second', padron_reclamado_hasta = clock_timestamp() - interval '1 second' WHERE id = $1", [id]);
     assert.equal(await resolverInscripcion(id, async () => false), true);
   } finally {
     continuar.resolve();
@@ -179,7 +182,7 @@ test('una reclamación vencida puede recuperarse y el dueño viejo no sobrescrib
 test('un resultado vencido se descarta aunque todavía no haya sucesor', async () => {
   const [id] = await sembrar();
   assert.equal(await resolverInscripcion(id, async () => {
-    await pool.query("UPDATE colonia.inscripciones SET padron_reclamado_hasta = clock_timestamp() - interval '1 second' WHERE id = $1", [id]);
+    await pool.query("UPDATE colonia.inscripciones SET padron_proximo_intento_en = clock_timestamp() - interval '1 second', padron_reclamado_hasta = clock_timestamp() - interval '1 second' WHERE id = $1", [id]);
     return true;
   }), false);
   assert.equal((await estado())[0].es_residente, null);
@@ -308,5 +311,137 @@ test('una consulta larga renueva su reclamación sin habilitar duplicados', { ti
   } finally {
     continuar.resolve();
     await trabajo;
+  }
+});
+
+async function vencerEspera(id) {
+  await pool.query("UPDATE colonia.inscripciones SET padron_proximo_intento_en = clock_timestamp() - interval '1 second' WHERE id = $1", [id]);
+}
+
+test('saturación guarda espera durable; otro proceso recupera sin adelantar el turno', { timeout: 15000 }, async t => {
+  const [primera, segunda] = await sembrar(2);
+  const orden = (await estado()).map(fila => fila.orden_recepcion);
+  const error = Object.assign(new Error('Saturado'), { codigo: 'SATURADO', reintentarEnMs: 90000 });
+  await assert.rejects(resolverInscripcion(primera, async () => { throw error; }), { codigo: 'SATURADO' });
+  const { rows: [registro] } = await pool.query(`SELECT padron_intentos, padron_ultimo_error,
+    extract(epoch FROM (padron_proximo_intento_en - padron_ultimo_intento_en)) AS demora
+    FROM colonia.inscripciones WHERE id = $1`, [primera]);
+  assert.equal(registro.padron_intentos, 1);
+  assert.equal(registro.padron_ultimo_error, 'SATURADO');
+  assert.ok(Number(registro.demora) >= 90);
+  assert.equal(await resolverInscripcion(primera, () => assert.fail('No ignorar Retry-After')), false);
+  await resolverInscripcion(segunda, async () => true);
+  assert.deepEqual((await estado()).map(fila => fila.estado), ['pendiente_de_validacion', 'pendiente_de_validacion']);
+  await vencerEspera(primera);
+  const { hijo, salida } = await iniciarReplica(t, primera);
+  const terminado = once(hijo, 'message', { signal: AbortSignal.timeout(5000) });
+  hijo.send({ continuar: true });
+  assert.deepEqual((await terminado)[0], { resuelta: true });
+  await salida;
+  assert.deepEqual((await estado()).map(fila => fila.estado), ['confirmada', 'en_lista_de_espera']);
+  assert.deepEqual((await estado()).map(fila => fila.orden_recepcion), orden);
+  const { rows: [final] } = await pool.query('SELECT padron_intentos, padron_proximo_intento_en, padron_ultimo_error FROM colonia.inscripciones WHERE id = $1', [primera]);
+  assert.deepEqual(final, { padron_intentos: 2, padron_proximo_intento_en: null, padron_ultimo_error: null });
+});
+
+test('timeout deja pendiente, programa reintento y una respuesta tardía no modifica el resultado', async () => {
+  const [id] = await sembrar();
+  const tardia = Promise.withResolvers();
+  let signal;
+  await assert.rejects(resolverInscripcion(id, (_documento, _jurisdiccion, opciones) => {
+    signal = opciones.signal;
+    return tardia.promise;
+  }, { timeoutMs: 20 }), { codigo: 'TIMEOUT' });
+  assert.equal(signal.aborted, true);
+  assert.equal((await estado())[0].estado, 'pendiente_de_validacion');
+  const { rows: [intento] } = await pool.query('SELECT padron_ultimo_error, padron_intentos FROM colonia.inscripciones WHERE id = $1', [id]);
+  assert.deepEqual(intento, { padron_ultimo_error: 'TIMEOUT', padron_intentos: 1 });
+  assert.equal(await resolverInscripcion(id, () => assert.fail('Esperar backoff')), false);
+  await vencerEspera(id);
+  await resolverInscripcion(id, async () => false);
+  const antes = await estado();
+  tardia.resolve(true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(await estado(), antes);
+  assert.equal(antes[0].estado, 'rechazada');
+});
+
+test('fallas repetidas aumentan la demora durable y los duplicados no cuentan como intentos', async () => {
+  const [id] = await sembrar();
+  for (let numero = 1; numero <= 3; numero++) {
+    await assert.rejects(resolverInscripcion(id, async () => { throw new Error('Caído'); }), /Caído/);
+    const { rows: [fila] } = await pool.query(`SELECT padron_intentos,
+      extract(epoch FROM (padron_proximo_intento_en - padron_ultimo_intento_en)) AS demora
+      FROM colonia.inscripciones WHERE id = $1`, [id]);
+    assert.equal(fila.padron_intentos, numero);
+    assert.ok(Number(fila.demora) >= 2 ** (numero - 1));
+    assert.equal(await resolverInscripcion(id, () => assert.fail('Duplicado anticipado')), false);
+    await vencerEspera(id);
+  }
+});
+
+test('una falla al guardar el reintento no produce ACK y conserva la planificación inicial', async () => {
+  const [id] = await sembrar();
+  await pool.query(`CREATE FUNCTION colonia.fallar_reintento() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN RAISE EXCEPTION 'Escritura fallida'; END $$`);
+  await pool.query(`CREATE TRIGGER fallar_reintento BEFORE UPDATE OF padron_ultimo_error ON colonia.inscripciones
+    FOR EACH ROW EXECUTE FUNCTION colonia.fallar_reintento()`);
+  try {
+    const confirmaciones = [];
+    await consumir({}, { content: Buffer.from(JSON.stringify({ inscripcionId: id })) }, {
+      resolver: id => resolverInscripcion(id, async () => { throw new Error('Caído'); }),
+      confirmar: (_canal, _msg, metodo) => confirmaciones.push(metodo),
+    });
+    assert.deepEqual(confirmaciones, ['nack']);
+    const { rows: [fila] } = await pool.query('SELECT padron_intentos, padron_proximo_intento_en, estado FROM colonia.inscripciones WHERE id = $1', [id]);
+    assert.equal(fila.padron_intentos, 1);
+    assert.ok(fila.padron_proximo_intento_en);
+    assert.equal(fila.estado, 'pendiente_de_validacion');
+  } finally {
+    await pool.query('DROP TRIGGER fallar_reintento ON colonia.inscripciones');
+    await pool.query('DROP FUNCTION colonia.fallar_reintento()');
+  }
+  await vencerEspera(id);
+  assert.equal(await resolverInscripcion(id, async () => true), true);
+});
+
+test('RabbitMQ conserva la falla durable y reentrega tras cerrar el canal hasta obtener ACK', { timeout: 15000 }, async () => {
+  const [id] = await sembrar();
+  const conexion = await amqp.connect({
+    hostname: process.env.COLA_HOST, port: Number(process.env.COLA_PORT || 5672),
+    username: process.env.COLA_USER, password: process.env.COLA_PASSWORD,
+    vhost: process.env.COLA_VHOST || '/',
+  });
+  try {
+    const canal = await conexion.createConfirmChannel();
+    const { queue } = await canal.assertQueue('', { exclusive: true });
+    canal.sendToQueue(queue, Buffer.from(JSON.stringify({ inscripcionId: id })), { persistent: true });
+    await canal.waitForConfirms();
+    const entrega = await canal.get(queue, { noAck: false });
+    await consumir(canal, entrega, {
+      resolver: id => resolverInscripcion(id, async () => { throw new Error('Padrón caído'); }),
+      confirmar: (_ch, _msg, metodo) => assert.equal(metodo, 'nack'),
+    });
+    const { rows: [falla] } = await pool.query('SELECT padron_intentos, padron_proximo_intento_en FROM colonia.inscripciones WHERE id = $1', [id]);
+    assert.equal(falla.padron_intentos, 1);
+    assert.ok(falla.padron_proximo_intento_en);
+    // Simula caída antes de enviar NACK: el broker conserva la entrega sin ACK.
+    await canal.close();
+    await vencerEspera(id);
+    const nuevo = await conexion.createChannel();
+    const repetida = await nuevo.get(queue, { noAck: false });
+    assert.ok(repetida.fields.redelivered);
+    let durable = false;
+    await consumir(nuevo, repetida, {
+      resolver: async id => {
+        const resultado = await resolverInscripcion(id, async () => true);
+        durable = (await estado())[0].estado === 'confirmada';
+        return resultado;
+      },
+      confirmar: (ch, msg, metodo) => { assert.equal(metodo, 'ack'); assert.equal(durable, true); ch.ack(msg); },
+    });
+    assert.equal(await nuevo.get(queue, { noAck: true }), false);
+  } finally {
+    await conexion.close();
   }
 });

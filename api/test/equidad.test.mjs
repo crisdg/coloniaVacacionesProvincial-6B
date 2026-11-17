@@ -320,6 +320,8 @@ test('las fallas del padrón conservan inscripción y orden, y permiten resolver
       estado: 'pendiente_de_validacion', es_residente: null,
       orden_recepcion: String(alta.body.ordenRecepcion), motivo_rechazo: null,
     });
+    assert.equal(await resolverInscripcion(alta.body.id, () => assert.fail('Espera durable')), false);
+    await pool.query("UPDATE colonia.inscripciones SET padron_proximo_intento_en = clock_timestamp() - interval '1 second' WHERE id = $1", [alta.body.id]);
     await resolverInscripcion(alta.body.id, consultar);
     const resuelta = await pool.query('SELECT estado, orden_recepcion FROM colonia.inscripciones WHERE id = $1', [alta.body.id]);
     assert.deepEqual(resuelta.rows[0], { estado: 'confirmada', orden_recepcion: String(alta.body.ordenRecepcion) });

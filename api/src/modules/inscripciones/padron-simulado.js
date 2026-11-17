@@ -1,11 +1,12 @@
 import { ErrorPadron } from './padron-cliente.js';
+import { esperarPadron } from './padron-reintentos.js';
 
 // Cada instancia consume sus escenarios en orden de inicio de llamada, incluso
 // con concurrencia. Al agotarlos vuelve al comportamiento normal, sin azar.
 // Las pruebas pueden inyectar una espera controlada en lugar de dormir realmente.
 export function crearPadronSimulado({
   escenarios = [],
-  esperar = (ms) => new Promise(resolve => setTimeout(resolve, ms)),
+  esperar = esperarPadron,
 } = {}) {
   const pasos = escenarios.map(({ demoraMs = 0, error, reintentarEnMs = 1000 }) => {
     if (!Number.isFinite(demoraMs) || demoraMs < 0
@@ -16,9 +17,11 @@ export function crearPadronSimulado({
     return { demoraMs, error, reintentarEnMs };
   });
   let siguiente = 0;
-  return async function consultarResidencia(documento, jurisdiccion) {
+  return async function consultarResidencia(documento, jurisdiccion, { signal } = {}) {
+    signal?.throwIfAborted();
     const paso = pasos[siguiente++] ?? {};
-    if (paso.demoraMs) await esperar(paso.demoraMs);
+    if (paso.demoraMs) await esperar(paso.demoraMs, signal);
+    signal?.throwIfAborted();
     if (paso.error === 'NO_DISPONIBLE') {
       throw new ErrorPadron('El padrón simulado no está disponible.');
     }

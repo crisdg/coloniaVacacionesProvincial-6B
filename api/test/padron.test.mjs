@@ -18,7 +18,7 @@ test('el cliente espera el permiso y transmite documento y jurisdicción al adap
     reservarConsulta: async () => { eventos.push('permiso'); return intentos++ === 0 ? 100 : 0; },
     esperar: async ms => { eventos.push(['espera', ms]); reloj += ms; },
     ahora: () => reloj,
-    consultarResidencia: async (...args) => { eventos.push(args); return false; },
+    consultarResidencia: async (documento, jurisdiccion) => { eventos.push([documento, jurisdiccion]); return false; },
   });
   assert.equal(await consultar('91000000', 'Provincia'), false);
   assert.deepEqual(eventos, ['permiso', ['espera', 100], 'permiso', ['91000000', 'Provincia']]);
