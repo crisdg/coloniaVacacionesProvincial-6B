@@ -42,6 +42,8 @@ before(async () => {
 
 after(async () => {
   if (servidor) await new Promise((resolve, reject) => servidor.close(error => error ? reject(error) : resolve()));
+  const { poolConsumidor } = await import('../src/modules/inscripciones/consumidor.js');
+  await poolConsumidor.end();
   if (pool) await pool.end();
   if (creada) {
     await admin.query('SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1', [baseTemporal]);

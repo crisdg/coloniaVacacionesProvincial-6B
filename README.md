@@ -147,6 +147,14 @@ Esta elección mantiene una conexión a PostgreSQL y el bloqueo de esa fila mien
 
 Para desplegar este cambio, detener los publicadores anteriores y arrancar todas las réplicas con la nueva versión. Una réplica vieja que consulta sin bloquear no participa de esta coordinación.
 
+El consumidor también se coordina por `inscripcionId`: toma un advisory lock de sesión en PostgreSQL antes de leer o consultar al padrón. Si otra réplica lo tiene, devuelve el mensaje con NACK y reencolado después de un segundo. Si la inscripción ya tiene residencia guardada o dejó de estar pendiente de validación, responde ACK sin repetir consulta ni asignación. La residencia y la asignación se confirman en una misma transacción antes del ACK; el dato persistido permite reconocer una reentrega incluso después de reiniciar la API. Esto también aplica a una inscripción validada que todavía espera a otra anterior.
+
+Durante la consulta externa solo se retiene la sesión y su advisory lock: no hay una transacción abierta ni bloqueo del turno o de la fila. La transacción posterior revalida estado y documento para respetar cancelaciones y correcciones concurrentes. Usa la misma conexión que tomó el lock; si se pierde esa sesión, el consumidor viejo no puede guardar su respuesta mediante una conexión nueva. Al terminar libera el lock; ante un error descarta la conexión, lo que revierte cualquier transacción abierta y libera los bloqueos cuando PostgreSQL detecta la desconexión.
+
+El costo es un **pool de hasta 10 conexiones adicionales por réplica**, separado del pool general de hasta 10: los consumidores que esperan al padrón no pueden ocupar las conexiones necesarias para otorgar sus permisos globales. Este presupuesto debe considerarse al escalar réplicas. El bloqueo requiere conservar la sesión de PostgreSQL durante el trabajo. No agrega una tabla inbox ni migraciones: para este evento de validación, `inscripcionId` identifica el trabajo y la residencia persistida indica que ya se realizó. Un futuro evento que requiera una nueva validación necesitará distinguir esa nueva versión del trabajo.
+
+La garantía no es exactamente una vez para la consulta externa: si el proceso o la conexión cae después de consultar y antes del commit, el reintento puede consultar otra vez. Las reentregas después del commit no repiten el procesamiento; las fallas anteriores mantienen el trabajo recuperable. Para activar esta coordinación, reemplazar todos los consumidores anteriores, que todavía no toman el advisory lock.
+
 La prioridad se define en la admisión al sistema, no en el clic del navegador ni en la llegada al gateway. Dentro de un turno, recepción, asignación, cancelación y cambios de cupo usan el mismo bloqueo: una solicitud posterior no puede obtener una plaza mientras una anterior con orden asignado todavía se está guardando. El bloqueo dura hasta commit o rollback y nunca abarca la consulta al padrón. Otros turnos pueden avanzar independientemente. `ordenRecepcion` es global e inmutable, puede tener saltos y no representa la posición actual en la lista de espera. Si el período cierra mientras una solicitud espera el bloqueo de admisión, se rechaza con 409.
 
 Las correcciones administrativas corresponden al mismo chico y conservan identificador, turno, convocatoria y orden original. Vuelven a comprobar la edad a la **fecha original de inscripción**. Si cambia el DNI, la residencia se valida antes de aceptar el cambio. No permiten cambiar libremente el estado ni corregir una inscripción cancelada o rechazada.
@@ -249,6 +257,14 @@ docker compose -f docker-compose.yml -f docker-compose.auth.yml run --rm --no-de
 ```
 
 Comprueba exclusión entre publicadores, progreso mientras una fila espera confirmación, rollback por fallo del broker, conservación de mensajes ya marcados, recuperación tras terminar otra réplica y confirms reales sin duplicados en el caso sin fallas. También fuerza un error al marcar después de publicar para demostrar la reentrega esperable con la garantía de al menos una vez.
+
+Para probar reentregas del consumidor con PostgreSQL y RabbitMQ reales, una base temporal y una cola exclusiva:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.auth.yml run --rm --no-deps -v ./api/src:/app/src:ro -v ./api/test:/app/test:ro -v ./api/migrations:/app/migrations:ro api node --test test/consumidor.test.mjs
+```
+
+Verifica exclusión entre procesos, reentrega después de commit sin ACK, NACK ante trabajo en vuelo o fallido, ausencia de nuevas consultas/escrituras para resultados persistidos, recuperación tras caída del proceso o pérdida de sesión, rollback de residencia y asignación, cancelación concurrente y permisos del padrón con las 10 conexiones de consumo ocupadas. Las fallas antes del commit muestran el límite de la garantía: la consulta al padrón puede repetirse, pero no se guarda un resultado parcial ni se duplica el cupo.
 
 Para verificar CORS y el reenvío de la clave en el gateway con JWT/JWKS de prueba y una API simulada, sin iniciar Keycloak ni modificar datos:
 

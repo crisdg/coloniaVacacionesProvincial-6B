@@ -1,8 +1,8 @@
 import amqp from 'amqplib';
-import { pool, enTransaccion } from '../../db.js';
-import { asignarTurno } from './asignacion.js';
-import { consultarPadron } from './padron.js';
 import { publicarLoteSalida } from './outbox.js';
+import { resolverInscripcion } from './consumidor.js';
+
+export { resolverInscripcion } from './consumidor.js';
 
 const COLA = 'colonia.residencia';
 
@@ -48,64 +48,33 @@ async function publicarPendientes() {
   }
 }
 
-// La consulta al padrón ocurre fuera de la transacción: el tope puede hacer esperar
-// y no conviene retener el lock del turno mientras tanto.
-export async function resolverInscripcion(inscripcionId, consultar = consultarPadron) {
-  const { rows } = await pool.query(
-    `SELECT i.id, i.turno_id, i.documento, i.estado, i.es_residente, c.jurisdiccion
-     FROM colonia.inscripciones i
-     JOIN colonia.convocatorias c ON c.id = i.convocatoria_id
-     WHERE i.id = $1`,
-    [inscripcionId],
-  );
-  const previa = rows[0];
-  if (!previa) return;
-  let residente;
-  let documentoConsultado;
-  if (previa.estado === 'pendiente_de_validacion' && previa.es_residente === null) {
-    residente = await consultar(previa.documento, previa.jurisdiccion);
-    documentoConsultado = previa.documento;
-  }
-  await enTransaccion(async (client) => {
-    await client.query('SELECT id FROM colonia.turnos WHERE id = $1 FOR UPDATE', [previa.turno_id]);
-    const actual = await client.query(
-      'SELECT id, estado, documento, es_residente FROM colonia.inscripciones WHERE id = $1 FOR UPDATE',
-      [inscripcionId],
-    );
-    const fila = actual.rows[0];
-    if (!fila || fila.estado === 'cancelada' || fila.estado === 'rechazada') return;
-    if (fila.estado === 'pendiente_de_validacion' && fila.es_residente === null
-      && fila.documento === documentoConsultado && residente !== undefined) {
-      await client.query(
-        `UPDATE colonia.inscripciones SET es_residente = $2, padron_consultado_en = clock_timestamp() WHERE id = $1`,
-        [fila.id, residente],
-      );
-    }
-    await asignarTurno(previa.turno_id, client);
-  });
-}
-
-function consumir(canal, msg) {
+export async function consumir(canal, msg, { resolver = resolverInscripcion, confirmar = acusar } = {}) {
   if (!msg) return;
   let datos;
   try {
     datos = JSON.parse(msg.content.toString());
   } catch (error) {
     console.error('Mensaje de la cola ilegible; se descarta:', error.message);
-    acusar(canal, msg, 'ack');
+    confirmar(canal, msg, 'ack');
     return;
   }
-  if (!Number.isInteger(datos.inscripcionId)) {
+  if (!Number.isInteger(datos?.inscripcionId) || datos.inscripcionId <= 0 || datos.inscripcionId > 2147483647) {
     console.error('Mensaje de la cola sin inscripcionId; se descarta.');
-    acusar(canal, msg, 'ack');
+    confirmar(canal, msg, 'ack');
     return;
   }
-  resolverInscripcion(datos.inscripcionId)
-    .then(() => acusar(canal, msg, 'ack'))
-    .catch((error) => {
-      console.error(`La inscripción ${datos.inscripcionId} sigue pendiente; se reintenta: ${error.message}`);
-      setTimeout(() => acusar(canal, msg, 'nack'), 1000);
-    });
+  try {
+    const resuelta = await resolver(datos.inscripcionId);
+    if (resuelta) {
+      confirmar(canal, msg, 'ack');
+      return;
+    }
+    // No confirmar un duplicado en vuelo: su dueño todavía puede fallar.
+  } catch (error) {
+    console.error(`La inscripción ${datos.inscripcionId} sigue pendiente; se reintenta: ${error.message}`);
+  }
+  await new Promise(resolve => setTimeout(resolve, 1000));
+  confirmar(canal, msg, 'nack');
 }
 
 function acusar(canal, msg, metodo) {
