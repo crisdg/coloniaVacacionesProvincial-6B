@@ -60,7 +60,7 @@ Keycloak importa `auth/keycloak/realm-colonia.json` solo si el volumen `colonia_
 
 ## Servicios y conexiones
 
-- `frontend`: página de login (Authorization Code + PKCE, cliente público `frontend`). Nginx reenvía `/api/` al gateway.
+- `frontend`: login con Authorization Code + PKCE (cliente público `frontend`) y pantalla React/Tailwind para que el tutor consulte turnos abiertos, inscriba chicos y consulte el estado de sus solicitudes. Nginx sirve el build y reenvía `/api/` al gateway.
 - `gateway`: valida firma, `iss`, `aud` y `exp`, aplica el rol y recién ahí reenvía a la API. Publica el puerto 8000.
 - `keycloak`: proveedor OIDC. Realm `colonia` versionado en el repo. Publica el puerto 8180 para que el navegador pueda iniciar sesión.
 - `api`: Node.js + Express. Un único módulo `inscripciones`, que también contiene las rutas de turnos. Se conecta a `db:5432` y a `cola:5672`, aplica sus migraciones al arrancar, publica la validación de residencia y la consume. No publica un puerto al host y no valida el token: toma el usuario y los roles de los headers `X-Usuario-Id` y `X-Usuario-Roles`, que pone el gateway.

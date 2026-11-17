@@ -10,6 +10,25 @@ services:
       api:
         condition: service_healthy
     networks: [backend]
+
+  gateway:
+    build: ./auth/gateway
+    environment:
+      PORT: 8000
+      API_URL: http://api:3000
+      JWKS_URL: http://keycloak:8080/realms/colonia/protocol/openid-connect/certs
+      ISSUER: http://localhost:8180/realms/colonia
+      AUDIENCE: api-colonia
+      CORS_ORIGIN: http://localhost:3001
+    ports:
+      - "8000:8000"
+    depends_on:
+      api:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+    networks: [backend]
+
   api:
     build: ./api
     environment:
@@ -36,6 +55,7 @@ services:
       retries: 5
       start_period: 10s
     networks: [backend]
+
   db:
     image: postgres:16-alpine
     environment:
@@ -51,6 +71,7 @@ services:
       timeout: 3s
       retries: 10
     networks: [backend]
+
   cola:
     image: rabbitmq:4-alpine
     hostname: cola
@@ -66,11 +87,24 @@ services:
       retries: 10
       start_period: 20s
     networks: [backend]
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0.0
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    command: ["start-dev", "--import-realm"]
+    volumes:
+      - ./auth/keycloak/realm-colonia.json:/opt/keycloak/data/import/realm-colonia.json:ro
+    ports:
+      - "8180:8080"
+    networks: [backend]
+
   swagger-ui:
     image: swaggerapi/swagger-ui:v5.17.14
     environment:
       SWAGGER_JSON: /spec/openapi.yaml
-      API_UPSTREAM: http://api:3000   # API_URL lo usa la imagen de Swagger para cargar el contrato
+      API_UPSTREAM: http://api:3000
     volumes:
       - ./openapi.yaml:/spec/openapi.yaml:ro
       - ./swagger/default.conf.template:/etc/nginx/templates/default.conf.template:ro
@@ -80,9 +114,10 @@ services:
       api:
         condition: service_healthy
     networks: [backend]
+
 volumes:
   colonia_pgdata:
   colonia_rabbitmq:
+
 networks:
   backend:
-
