@@ -35,11 +35,11 @@ const REGLAS = [
 const app = express();
 app.use(express.json());
 
-// CORS: Swagger UI (localhost:8080) llama al gateway (localhost:8000) y manda el header Authorization
+// CORS: Swagger UI (localhost:8080) y Frontend (localhost:3001) llaman al gateway (localhost:8000)
 app.use((req, res, next) => {
   res.set('Access-Control-Allow-Origin', CORS_ORIGIN);
   res.set('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
-  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key'); // <-- Agregado Idempotency-Key aquí
   res.set('Access-Control-Expose-Headers', 'Location, WWW-Authenticate');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
