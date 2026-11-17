@@ -164,6 +164,10 @@ RabbitMQ conserva el mensaje hasta completar el procesamiento durable. Se mantie
 
 La prioridad se define en la admisión al sistema, no en el clic del navegador ni en la llegada al gateway. Dentro de un turno, recepción, asignación, cancelación y cambios de cupo usan el mismo bloqueo: una solicitud posterior no puede obtener una plaza mientras una anterior con orden asignado todavía se está guardando. El bloqueo dura hasta commit o rollback y nunca abarca la consulta al padrón. Otros turnos pueden avanzar independientemente. `ordenRecepcion` es global e inmutable, puede tener saltos y no representa la posición actual en la lista de espera. Si el período cierra mientras una solicitud espera el bloqueo de admisión, se rechaza con 409.
 
+El asignador usa la primera residencia desconocida como límite de avance. Con el turno bloqueado, selecciona por orden solo tantas candidatas como plazas disponibles y clasifica en bloque los resultados nuevos anteriores a ese límite. Las inscripciones que ya esperan y no obtienen plaza no se recorren ni bloquean. La migración `007_indices_asignacion.sql` agrega índices parciales para la primera validación pendiente, las candidatas a cupo y los resultados pendientes de clasificar; el conteo de confirmadas aprovecha el índice existente por turno y estado. Se conserva el bloqueo del turno y no se usa `SKIP LOCKED`, porque saltar una solicitud rompería la equidad.
+
+La asignación se completa en la misma transacción, sin cortar en lotes que dependan de otro mensaje para continuar. El trabajo sigue siendo proporcional a las filas que realmente cambian y a las confirmadas que se cuentan; un aumento grande de cupo o liberar muchas validaciones juntas todavía puede requerir una transacción grande. Los índices agregan almacenamiento y mantenimiento en las escrituras.
+
 Las correcciones administrativas corresponden al mismo chico y conservan identificador, turno, convocatoria y orden original. Vuelven a comprobar la edad a la **fecha original de inscripción**. Si cambia el DNI, la residencia se valida antes de aceptar el cambio. No permiten cambiar libremente el estado ni corregir una inscripción cancelada o rechazada.
 
 El cupo es entero no negativo y no se reduce por debajo de los confirmados. Cambiar fechas del turno no invalida solicitudes existentes. La sede y convocatoria del turno no se modifican.
@@ -234,10 +238,12 @@ Cubren alta y actualización de turnos, alta de inscripciones, unicidad con pedi
 Las pruebas de concurrencia de admisión usan las fuentes locales y una base temporal que se crea y elimina automáticamente (requieren permiso `CREATEDB`, disponible con el usuario del Compose local):
 
 ```powershell
-docker compose -f docker-compose.yml -f docker-compose.auth.yml run --rm --no-deps -v ./api/src:/app/src:ro -v ./api/test:/app/test:ro -v ./api/migrations:/app/migrations:ro api node --test test/equidad.test.mjs
+docker compose -f docker-compose.yml -f docker-compose.auth.yml run --rm --no-deps -v ./api/src:/app/src:ro -v ./api/test:/app/test:ro -v ./api/migrations:/app/migrations:ro api node --test --test-concurrency=1 test/equidad.test.mjs test/asignacion.test.mjs
 ```
 
 Fuerzan una pausa antes de que la primera inscripción sea visible y comprueban prioridad, independencia entre turnos y revalidación del período ante un cambio concurrente. Ejecutan rutas y asignador reales; no inician el consumidor de RabbitMQ y simulan residencia favorable para aislar la coordinación transaccional.
+
+La suite del asignador compara sus resultados con el recorrido anterior en 24 escenarios y verifica continuidad después de cancelar la primera pendiente y aumentar cupo. También usa `FOR UPDATE NOWAIT` para comprobar que no bloquea filas sin cambios y `EXPLAIN (ANALYZE, BUFFERS)` para comparar trabajo real. En una ejecución local con 5.000 en espera, una validación nueva y una plaza libre, el SELECT anterior registró 6.483 accesos a buffers frente a 67 para todas las consultas del asignador nuevo. Es una medición de ese escenario, no una prueba de capacidad de producción; la prueba exige una reducción de al menos la mitad, sin fijar tiempos de ejecución.
 
 La misma suite también prueba reintentos idempotentes concurrentes, conflictos de contenido, aislamiento por tutor, respuesta original después de cancelación/cierre, validación del header y rollback completo ante una falla del outbox.
 
