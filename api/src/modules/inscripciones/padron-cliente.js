@@ -1,3 +1,5 @@
+import { VIGENCIA_PERMISO_MS } from './padron-config.js';
+
 export class ErrorPadron extends Error {
   constructor(mensaje, { codigo = 'NO_DISPONIBLE', reintentarEnMs } = {}) {
     super(mensaje);
@@ -13,7 +15,7 @@ export function crearConsultaPadron({
   reservarConsulta,
   consultarResidencia,
   esperar = (ms) => new Promise(resolve => setTimeout(resolve, ms)),
-  ahora = Date.now,
+  ahora = () => performance.now(),
 }) {
   return async function consultarPadron(documento, jurisdiccion, { esperaMaximaMs = Infinity } = {}) {
     if (typeof jurisdiccion !== 'string' || jurisdiccion.trim() === '') {
@@ -21,17 +23,28 @@ export function crearConsultaPadron({
     }
     const inicio = ahora();
     for (;;) {
+      // Medir desde ANTES de pedir permiso es conservador: incluye red, espera
+      // del lock y commit. No se comparan relojes de distintos servidores.
+      const inicioReserva = ahora();
       const esperaMs = await reservarConsulta();
-      if (esperaMs === 0) break;
-      if (ahora() - inicio + esperaMs > esperaMaximaMs) {
+      const transcurrido = ahora() - inicio;
+      if (transcurrido > esperaMaximaMs) {
         throw new ErrorPadron('Se alcanzó el tope de consultas al padrón.', { codigo: 'LIMITE_LOCAL' });
       }
-      await esperar(esperaMs);
+      if (esperaMs === 0 && ahora() - inicioReserva < VIGENCIA_PERMISO_MS) {
+        // Iniciar directamente: no agregar awaits entre la vigencia y el adaptador.
+        const residente = await consultarResidencia(documento, jurisdiccion);
+        if (typeof residente !== 'boolean') {
+          throw new ErrorPadron('El padrón devolvió una respuesta inválida.', { codigo: 'RESPUESTA_INVALIDA' });
+        }
+        return residente;
+      }
+      // Un permiso vencido no se reintegra: permanece contado hasta su caducidad.
+      const demora = esperaMs || 1;
+      if (transcurrido + demora > esperaMaximaMs) {
+        throw new ErrorPadron('Se alcanzó el tope de consultas al padrón.', { codigo: 'LIMITE_LOCAL' });
+      }
+      await esperar(demora);
     }
-    const residente = await consultarResidencia(documento, jurisdiccion);
-    if (typeof residente !== 'boolean') {
-      throw new ErrorPadron('El padrón devolvió una respuesta inválida.', { codigo: 'RESPUESTA_INVALIDA' });
-    }
-    return residente;
   };
 }

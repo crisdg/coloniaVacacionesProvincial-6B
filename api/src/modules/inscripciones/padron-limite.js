@@ -1,35 +1,38 @@
 import { enTransaccion } from '../../db.js';
+import { leerTopePadron, VENTANA_PADRON_MS, VIGENCIA_PERMISO_MS } from './padron-config.js';
 
-function topePorSegundo() {
-  const valor = Number(process.env.PADRON_CONSULTAS_POR_SEGUNDO ?? 50);
-  return Number.isInteger(valor) && valor > 0 ? valor : 50;
-}
+const TOPE = leerTopePadron();
+const RETENCION_MS = VENTANA_PADRON_MS + VIGENCIA_PERMISO_MS;
+const LOCK_PADRON = 727002;
 
-// Regulador actual por segundos fijos. La ventana móvil corresponde al paso 5.
-// Devuelve 0 si obtuvo permiso, o los milisegundos hasta el próximo segundo.
+// La exclusión global cubre únicamente contar/limpiar/insertar, nunca la espera
+// ni la consulta externa. Cada sentencia posterior al lock ve los commits previos.
+// Devuelve 0 si obtuvo permiso, o los ms hasta que venza el permiso más antiguo.
 export async function reservarConsulta() {
-  const tope = topePorSegundo();
   return enTransaccion(async (client) => {
-    const reserva = await client.query(
-      `INSERT INTO colonia.consultas_padron (segundo, cantidad)
-       VALUES (date_trunc('second', clock_timestamp()), 1)
-       ON CONFLICT (segundo) DO UPDATE
-         SET cantidad = colonia.consultas_padron.cantidad + 1
-         WHERE colonia.consultas_padron.cantidad < $1
-       RETURNING cantidad`,
-      [tope],
-    );
-    if (reserva.rows.length) {
-      await client.query(
-        `DELETE FROM colonia.consultas_padron WHERE segundo < clock_timestamp() - interval '2 minutes'`,
-      );
-      return 0;
-    }
+    await client.query('SELECT pg_advisory_xact_lock($1)', [LOCK_PADRON]);
     const { rows } = await client.query(
-      `SELECT ceil(extract(epoch FROM (
-         date_trunc('second', clock_timestamp()) + interval '1 second' - clock_timestamp()
-       )) * 1000)::int AS espera`,
+      `WITH reloj AS MATERIALIZED (SELECT clock_timestamp() AS ahora),
+       vigentes AS MATERIALIZED (
+         SELECT count(*)::int AS cantidad, min(concedido_en) AS primero
+         FROM colonia.permisos_padron, reloj
+         WHERE concedido_en > ahora - $2 * interval '1 millisecond'
+       ),
+       limpieza AS (
+         DELETE FROM colonia.permisos_padron USING reloj
+         WHERE concedido_en <= ahora - $2 * interval '1 millisecond'
+       ),
+       permiso AS (
+         INSERT INTO colonia.permisos_padron (concedido_en)
+         SELECT ahora FROM reloj, vigentes WHERE cantidad < $1 RETURNING id
+       )
+       SELECT CASE WHEN EXISTS (SELECT 1 FROM permiso) THEN 0
+         ELSE greatest(1, ceil(extract(epoch FROM (
+           primero + $2 * interval '1 millisecond' - ahora
+         )) * 1000)::int) END AS espera
+       FROM reloj, vigentes`,
+      [TOPE, RETENCION_MS],
     );
-    return Math.max(rows[0].espera, 1);
+    return rows[0].espera;
   });
 }

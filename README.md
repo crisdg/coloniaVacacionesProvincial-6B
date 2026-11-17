@@ -68,13 +68,19 @@ Keycloak importa `auth/keycloak/realm-colonia.json` solo si el volumen `colonia_
 - `cola`: RabbitMQ, sin puerto publicado, con healthcheck y volumen `colonia_rabbitmq`. La API publica y consume la cola durable `colonia.residencia` por el exchange por defecto: un mensaje lo toma un solo consumidor.
 - `swagger-ui`: muestra `openapi.yaml`, se autoriza contra Keycloak y reenvía `/api/` al gateway.
 
-El padrón provincial está simulado dentro de la API: un DNI que termina en `0` no reside en la jurisdicción de la convocatoria; el resto sí. Cada consulta, también un reintento, toma un cupo de la tabla `colonia.consultas_padron`. El regulador actual usa **segundos fijos**, con un tope configurado de 50 compartido por todos los procesos de la API; todavía no garantiza 50 en cualquier ventana móvil de un segundo. Si la consulta falla, la inscripción sigue en `pendiente_de_validacion` y el mensaje se vuelve a encolar.
+El padrón provincial está simulado dentro de la API: un DNI que termina en `0` no reside en la jurisdicción de la convocatoria; el resto sí. Cada consulta, también un reintento o una corrección administrativa, necesita un permiso global registrado en `colonia.permisos_padron`. El límite es **como máximo 50 inicios de consulta en una ventana móvil de un segundo**, compartido por todas las réplicas conectadas a la misma base. No se reinicia el cupo al cambiar de segundo ni al reiniciar un proceso. Si la consulta falla, la inscripción sigue en `pendiente_de_validacion` y el mensaje se vuelve a encolar.
+
+La concesión usa el reloj de PostgreSQL y un bloqueo asesor transaccional compartido: cuenta los permisos vigentes, elimina los vencidos y registra uno nuevo si hay lugar. Todas esas operaciones ocurren bajo el mismo bloqueo. Si está lleno, devuelve cuánto falta para que venza el más antiguo; se espera fuera de la transacción y se vuelve a comprobar. La consulta externa también ocurre fuera del bloqueo. Si PostgreSQL falla, no se consulta el padrón sin permiso.
+
+Un permiso debe usarse antes de 100 ms, medidos con reloj monotónico desde **antes** de solicitarlo. Si llegó tarde por red, bloqueo o pausa del proceso, el cliente lo descarta y solicita otro; no lo reintegra. PostgreSQL conserva cada permiso durante 1.100 ms (ventana de 1.000 ms más margen de vigencia). Así se cubre el desfase entre concesión e inicio del adaptador, que se invoca directamente al verificar la vigencia, sin otra espera intermedia. La garantía se refiere al inicio de la llamada al adaptador: un futuro adaptador HTTP debe iniciar el pedido inmediatamente, sin agregar una cola interna antes del envío. La latencia de transporte hasta un proveedor real requiere además verificar su propia política de tasa.
+
+Este margen es deliberadamente conservador: el máximo teórico sostenido es aproximadamente **45,5 consultas/s** con la configuración de 50; puede ser menor si se descartan permisos o hay errores. Se prioriza no sobrepasar el límite antes que aprovechar cada consulta disponible. La variable `PADRON_CONSULTAS_POR_SEGUNDO` se valida al arrancar: admite enteros de 1 a 50, usa 50 si no está definida y rechaza valores inválidos o mayores, sin reemplazarlos silenciosamente. Todas las réplicas deben usar el mismo valor. El límite regula la tasa global, no garantiza equidad entre consumidores; la prioridad de cupos sigue resolviéndose por turno en la base.
 
 La integración está separada en `padron-limite.js` (permisos globales en PostgreSQL), `padron-cliente.js` (esperar permiso y consultar) y `padron-simulado.js` (adaptador de residencia). `padron.js` compone esas piezas y conserva la función `consultarPadron` usada por las rutas y el consumidor. El adaptador recibe documento y jurisdicción, devuelve `true`/`false` o lanza un error técnico; una respuesta inválida también es error, nunca rechazo por residencia.
 
 Las pruebas crean instancias del simulador con una secuencia de escenarios: `{ demoraMs: 500 }`, `{ error: 'NO_DISPONIBLE' }` o `{ error: 'SATURADO', reintentarEnMs: 2500 }`. Se consumen por orden de inicio de llamada, sin azar ni configuración global; al agotarse vuelve la regla normal del DNI. Se puede inyectar una espera controlada para liberar la respuesta desde la prueba sin dormir realmente. La demo usa una instancia sin escenarios de falla y no expone endpoints para activarlos.
 
-`SATURADO` simula el rechazo externo por tasa (equivalente a HTTP 429), distinto de `LIMITE_LOCAL` al agotar el presupuesto de espera del regulador. `reintentarEnMs` es información disponible para la futura política de reintentos: el consumidor todavía conserva su reencolado actual. `esperaMaximaMs` limita únicamente la espera de permiso; el timeout de la consulta externa y el backoff se implementarán en el paso 8. La ventana móvil del regulador corresponde al paso 5.
+`SATURADO` simula el rechazo externo por tasa (equivalente a HTTP 429), distinto de `LIMITE_LOCAL` al agotar el presupuesto de espera del regulador. `reintentarEnMs` es información disponible para la futura política de reintentos: el consumidor todavía conserva su reencolado actual. `esperaMaximaMs` limita la obtención de un permiso vigente, incluido el tiempo de consulta a PostgreSQL; el timeout de la consulta externa y el backoff se implementarán en el paso 8.
 
 Las conexiones **entre servicios** usan nombres DNS de Compose. `localhost` se usa solo en las URLs del navegador; el healthcheck de la API usa loopback para comprobar el propio contenedor, no para conectarse a otro servicio.
 
@@ -128,7 +134,7 @@ Flujo funcional:
 
 1. El tutor elige un turno. El sistema comprueba datos, edad, período abierto y ausencia de inscripción activa en la convocatoria. Estas validaciones y la unicidad deben mantenerse también con solicitudes concurrentes.
 2. La admisión bloquea el turno antes de generar el orden y guarda durablemente la solicitud y un mensaje en `colonia.salida`, en la misma transacción. Comprueba las fechas vigentes del turno y toma la hora de PostgreSQL después de obtener ese bloqueo. Se responde `202 Accepted` con estado `pendiente_de_validacion`, `ordenRecepcion` y la ubicación para consultar el resultado. Esto no confirma un cupo. Si RabbitMQ no está, el mensaje queda en la bandeja y se publica cuando el broker vuelve.
-3. La cola procesa la validación de residencia con el regulador global configurado en **50 consultas por segundo fijo**, aunque existan varios consumidores. Una falla técnica mantiene la solicitud pendiente para reintentar; no equivale a un rechazo.
+3. La cola procesa la validación de residencia con el regulador global de **hasta 50 inicios de consulta en cualquier ventana móvil de un segundo**, aunque existan varios consumidores. Una falla técnica mantiene la solicitud pendiente para reintentar; no equivale a un rechazo.
 4. Si reside en la jurisdicción, se asigna cupo de forma transaccional respetando el orden. Queda `confirmada` si corresponde una plaza, o `en_lista_de_espera` si no alcanza el cupo. Si el padrón determina que no reside, queda `rechazada`, con motivo.
 5. Una respuesta rápida del padrón no permite adelantar solicitudes anteriores pendientes del mismo turno. La asignación posterior de ese turno espera su resolución; no se implementan reservas temporales ni plazos de corrección. Los otros turnos pueden continuar. Esta elección protege la equidad a costa de demorar confirmaciones si el padrón falla.
 6. Al aumentar el cupo o cancelar una confirmada, se continúa asignando en orden. Cancelar una pendiente o una inscripción en espera no libera una plaza ocupada. Una solicitud cancelada no puede confirmarse por un resultado tardío del padrón.
@@ -152,6 +158,8 @@ Las reservas provisionales por correcciones, el plazo de 48 horas y las prórrog
 `.env.example` contiene nombres de variables y valores no secretos. `.env` está excluido por `.gitignore`. Si esta carpeta todavía no tiene Git inicializado, estas exclusiones se aplicarán cuando se cree el repositorio.
 
 `db/init.sql` crea únicamente el esquema `colonia` y solo corre cuando el volumen está vacío. El modelo está en `api/migrations/`: la API aplica al arrancar las migraciones que falten y las registra en `colonia.migraciones`, así funciona también con un volumen existente. Una migración nueva se agrega como otro archivo numerado, sin editar las ya aplicadas.
+
+La migración `004_ventana_padron.sql` reemplaza el contador técnico por el registro de permisos; no modifica inscripciones. Para esta transición hay que detener todas las APIs/consumidores anteriores, esperar al menos 1,1 segundos desde su última consulta al padrón y luego arrancar la versión nueva. No admite mezclar versiones viejas y nuevas durante el despliegue. Los reinicios posteriores conservan los permisos en PostgreSQL y no requieren vaciar la tabla.
 
 Modificar credenciales en `.env` no actualiza automáticamente las credenciales ya almacenadas por PostgreSQL o RabbitMQ.
 
@@ -220,6 +228,14 @@ Las pruebas del cliente y del simulador no necesitan Docker, credenciales ni Pos
 node --test api/test/padron.test.mjs
 ```
 
+Para probar la ventana móvil con PostgreSQL real y tres procesos independientes, en una base temporal que se elimina al finalizar:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.auth.yml run --rm --no-deps -v ./api/src:/app/src:ro -v ./api/test:/app/test:ro -v ./api/migrations:/app/migrations:ro api node --test test/padron-limite.test.mjs
+```
+
+Esta suite verifica el cambio de segundo, la limpieza de vencidos, las reservas concurrentes y el límite observado en los inicios reales del adaptador entre procesos. No representa una prueba de carga provincial ni una medición de la recepción de paquetes en un padrón HTTP externo.
+
 Para verificar CORS y el reenvío de la clave en el gateway con JWT/JWKS de prueba y una API simulada, sin iniciar Keycloak ni modificar datos:
 
 ```powershell
@@ -241,7 +257,7 @@ docker compose -f docker-compose.yml -f docker-compose.auth.yml run --rm --no-de
 - [x] 401 y 403 con Problem Details, y `securitySchemes` en `openapi.yaml`.
 - [x] La API no publica puerto. La contraseña de admin de Keycloak está en `.env`.
 - [x] Turnos e inscripciones persistidos en PostgreSQL, con migraciones y pruebas de contrato.
-- [x] Cola y padrón simulado con regulador global de 50 consultas por segundo fijo; asignación de cupo en orden.
+- [x] Cola y padrón simulado con ventana móvil global de hasta 50 inicios por segundo y vigencia de permisos; asignación de cupo en orden.
 
 La guía original se conserva en `docs/clase10-original.md`. El BFF mobile del ejemplo no forma parte del Compose de colonia; su código se conserva como referencia en `docs/template-bff-mobile/`.
 

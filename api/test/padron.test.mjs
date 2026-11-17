@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { crearConsultaPadron, ErrorPadron } from '../src/modules/inscripciones/padron-cliente.js';
 import { crearPadronSimulado } from '../src/modules/inscripciones/padron-simulado.js';
+import { leerTopePadron, VIGENCIA_PERMISO_MS } from '../src/modules/inscripciones/padron-config.js';
 
 test('el adaptador conserva la regla de residencia de la demo', async () => {
   const padron = crearPadronSimulado();
@@ -91,4 +92,49 @@ test('los escenarios rechazan configuraciones inválidas al construirse', () => 
   for (const escenario of [{ demoraMs: -1 }, { error: 'ERROR_DESCONOCIDO' }, { reintentarEnMs: NaN }]) {
     assert.throws(() => crearPadronSimulado({ escenarios: [escenario] }), TypeError);
   }
+});
+
+test('un permiso que llega tarde se descarta y se solicita otro antes de consultar', async () => {
+  let reloj = 0;
+  let reservas = 0;
+  const llamadas = [];
+  const consultar = crearConsultaPadron({
+    reservarConsulta: async () => {
+      reservas++;
+      if (reservas === 1) reloj += VIGENCIA_PERMISO_MS;
+      return 0;
+    },
+    esperar: async ms => { reloj += ms; },
+    ahora: () => reloj,
+    consultarResidencia: async () => { llamadas.push(reservas); return true; },
+  });
+  assert.equal(await consultar('91000001', 'Provincia'), true);
+  assert.deepEqual(llamadas, [2]);
+});
+
+test('el presupuesto también limita permisos tardíos, sin consultar el padrón', async () => {
+  let reloj = 0;
+  const consultar = crearConsultaPadron({
+    reservarConsulta: async () => { reloj += 200; return 0; },
+    ahora: () => reloj,
+    consultarResidencia: async () => assert.fail('No debe utilizar un permiso tardío.'),
+  });
+  await assert.rejects(consultar('91000001', 'Provincia', { esperaMaximaMs: 150 }), { codigo: 'LIMITE_LOCAL' });
+});
+
+test('la configuración admite solo límites enteros entre 1 y 50', () => {
+  assert.equal(leerTopePadron('1'), 1);
+  assert.equal(leerTopePadron('50'), 50);
+  for (const valor of ['', '0', '-1', '51', '500', '1.5', 'abc', 'Infinity']) {
+    assert.throws(() => leerTopePadron(valor), /entre 1 y 50/);
+  }
+});
+
+test('si falla la coordinación global no se consulta el padrón sin permiso', async () => {
+  const fallo = new Error('PostgreSQL no disponible');
+  const consultar = crearConsultaPadron({
+    reservarConsulta: async () => { throw fallo; },
+    consultarResidencia: async () => assert.fail('No debe consultar sin coordinación.'),
+  });
+  await assert.rejects(consultar('91000001', 'Provincia'), error => error === fallo);
 });
