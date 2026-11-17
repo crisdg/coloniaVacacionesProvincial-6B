@@ -1,69 +1,76 @@
-import { crearPool } from '../../db.js';
+import { randomUUID } from 'node:crypto';
+import { crearPool, enTransaccion } from '../../db.js';
 import { asignarTurno } from './asignacion.js';
 import { consultarPadron } from './padron.js';
 
-// Separado del pool de rutas/outbox/permisos: los consumidores esperan al padrón
-// con una sesión reservada y no deben agotar las conexiones que dan sus permisos.
+// Solo consultas cortas: ninguna conexión queda retenida esperando al padrón.
 export const poolConsumidor = crearPool();
-const LOCK_INSCRIPCION = 727003;
+const VIGENCIA_MS = 60000;
+const RENOVACION_MS = 20000;
 
-// true: resultado durable o nada pendiente; false: otra réplica tiene el trabajo.
+// false conserva el mensaje para reentrega: dueño activo, vencido o invalidado.
 export async function resolverInscripcion(inscripcionId, consultar = consultarPadron) {
-  const client = await poolConsumidor.connect();
-  let adquirido = false;
-  let descartar = false;
-  // Si se pierde esta sesión no puede persistirse el resultado con otra conexión.
-  const conexionPerdida = () => { descartar = true; };
-  client.on('error', conexionPerdida);
-  try {
-    const { rows: [lock] } = await client.query(
-      'SELECT pg_try_advisory_lock($1::integer, $2::integer) AS adquirido',
-      [LOCK_INSCRIPCION, inscripcionId],
+  const token = randomUUID();
+  const { rows: [previa] } = await poolConsumidor.query(
+    `UPDATE colonia.inscripciones i
+     SET padron_token = $2, padron_reclamado_hasta = clock_timestamp() + $3 * interval '1 millisecond'
+     FROM colonia.convocatorias c
+     WHERE i.id = $1 AND c.id = i.convocatoria_id
+       AND i.estado = 'pendiente_de_validacion' AND i.es_residente IS NULL
+       AND (i.padron_token IS NULL OR i.padron_reclamado_hasta <= clock_timestamp())
+     RETURNING i.documento, i.turno_id, c.jurisdiccion`,
+    [inscripcionId, token, VIGENCIA_MS],
+  );
+  if (!previa) {
+    const { rows: [fila] } = await poolConsumidor.query(
+      'SELECT estado, es_residente FROM colonia.inscripciones WHERE id = $1', [inscripcionId],
     );
-    adquirido = lock.adquirido;
-    if (!adquirido) return false;
-    const { rows: [previa] } = await client.query(
-      `SELECT i.turno_id, i.documento, i.estado, i.es_residente, c.jurisdiccion
-       FROM colonia.inscripciones i
-       JOIN colonia.convocatorias c ON c.id = i.convocatoria_id WHERE i.id = $1`,
-      [inscripcionId],
-    );
-    // Residencia y asignación se guardan juntas. Una reentrega tras commit no
-    // necesita consultar ni ejecutar de nuevo el asignador, aun si espera orden.
-    if (!previa || previa.estado !== 'pendiente_de_validacion' || previa.es_residente !== null) return true;
+    return !fila || fila.estado !== 'pendiente_de_validacion' || fila.es_residente !== null;
+  }
 
-    // Fuera de la transacción y sin bloquear el turno ni la fila de inscripción.
+  let perdida = false;
+  let renovando = Promise.resolve();
+  let timer;
+  const programar = () => {
+    timer = setTimeout(() => {
+      renovando = poolConsumidor.query(
+        `UPDATE colonia.inscripciones
+         SET padron_reclamado_hasta = clock_timestamp() + $3 * interval '1 millisecond'
+         WHERE id = $1 AND padron_token = $2 AND padron_reclamado_hasta > clock_timestamp()`,
+        [inscripcionId, token, VIGENCIA_MS],
+      ).then(({ rowCount }) => { perdida = rowCount !== 1; })
+        .catch(() => { perdida = true; })
+        .then(() => { if (!perdida) programar(); });
+    }, RENOVACION_MS);
+    timer.unref();
+  };
+  const detener = async () => { clearTimeout(timer); await renovando; clearTimeout(timer); };
+  programar();
+  try {
     const residente = await consultar(previa.documento, previa.jurisdiccion);
-    await client.query('BEGIN');
-    await client.query('SELECT id FROM colonia.turnos WHERE id = $1 FOR UPDATE', [previa.turno_id]);
-    const { rows: [actual] } = await client.query(
-      'SELECT estado, documento, es_residente FROM colonia.inscripciones WHERE id = $1 FOR UPDATE',
-      [inscripcionId],
-    );
-    if (actual?.estado === 'pendiente_de_validacion' && actual.es_residente === null
-      && actual.documento === previa.documento) {
-      await client.query(
-        'UPDATE colonia.inscripciones SET es_residente = $2, padron_consultado_en = clock_timestamp() WHERE id = $1',
-        [inscripcionId, residente],
+    await detener();
+    if (perdida) return false;
+    return await enTransaccion(async client => {
+      // Mismo orden de locks que cancelaciones y asignador.
+      await client.query('SELECT id FROM colonia.turnos WHERE id = $1 FOR UPDATE', [previa.turno_id]);
+      await client.query('SELECT id FROM colonia.inscripciones WHERE id = $1 FOR UPDATE', [inscripcionId]);
+      const { rowCount } = await client.query(
+        `UPDATE colonia.inscripciones SET es_residente = $3, padron_consultado_en = clock_timestamp(),
+           padron_token = NULL, padron_reclamado_hasta = NULL
+         WHERE id = $1 AND padron_token = $2 AND padron_reclamado_hasta > clock_timestamp()
+           AND estado = 'pendiente_de_validacion' AND es_residente IS NULL`,
+        [inscripcionId, token, residente],
       );
+      if (!rowCount) return false;
       await asignarTurno(previa.turno_id, client);
-    }
-    await client.query('COMMIT');
-    return true;
-  } catch (error) {
-    // Destruir la sesión revierte cualquier transacción abierta y libera su lock.
-    // También cubre un timeout cuyo resultado SQL haya quedado incierto.
-    descartar = true;
-    throw error;
+      return true;
+    });
   } finally {
-    if (adquirido && !descartar) {
-      try {
-        await client.query('SELECT pg_advisory_unlock($1::integer, $2::integer)', [LOCK_INSCRIPCION, inscripcionId]);
-      } catch {
-        descartar = true;
-      }
-    }
-    client.removeListener('error', conexionPerdida);
-    client.release(descartar);
+    await detener();
+    // Nunca liberar la reclamación de un sucesor. Si la base cayó, vence sola.
+    await poolConsumidor.query(
+      `UPDATE colonia.inscripciones SET padron_token = NULL, padron_reclamado_hasta = NULL
+       WHERE id = $1 AND padron_token = $2`, [inscripcionId, token],
+    ).catch(() => {});
   }
 }

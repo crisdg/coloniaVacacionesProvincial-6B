@@ -143,6 +143,9 @@ router.patch('/:id', async (req, res) => {
         throw conflicto(`No se puede corregir una inscripción ${actual.estado}.`);
       }
       const cambiaDocumento = chico.documento !== undefined && chico.documento !== actual.documento;
+      if (cambiaDocumento && !pideOtroDocumento) {
+        throw conflicto('El documento cambió durante la corrección. Volvé a intentar.');
+      }
       const nuevo = {
         nombre: chico.nombre ?? actual.nombre,
         apellido: chico.apellido ?? actual.apellido,
@@ -150,15 +153,21 @@ router.patch('/:id', async (req, res) => {
         documento: cambiaDocumento ? chico.documento : actual.documento,
       };
       validarEdad(nuevo.fechaNacimiento, fechaEnArgentina(actual.creado_en));
-      const { rows } = await client.query(
+      let { rows } = await client.query(
         `UPDATE colonia.inscripciones
-         SET nombre = $2, apellido = $3, fecha_nacimiento = $4, documento = $5,
-             es_residente = CASE WHEN $6 THEN true ELSE es_residente END,
-             padron_consultado_en = CASE WHEN $6 THEN clock_timestamp() ELSE padron_consultado_en END
+         SET nombre = $2, apellido = $3, fecha_nacimiento = $4, documento = $5
          WHERE id = $1 RETURNING *`,
-        [id, nuevo.nombre, nuevo.apellido, nuevo.fechaNacimiento, nuevo.documento, cambiaDocumento],
+        [id, nuevo.nombre, nuevo.apellido, nuevo.fechaNacimiento, nuevo.documento],
       );
-      if (cambiaDocumento) await asignarTurno(actual.turno_id, client);
+      if (cambiaDocumento) {
+        // El cambio invalida el resultado anterior y cualquier trabajador en vuelo.
+        // Guardar luego la residencia recién consultada, dentro de la misma transacción.
+        ({ rows } = await client.query(
+          `UPDATE colonia.inscripciones SET es_residente = true, padron_consultado_en = clock_timestamp()
+           WHERE id = $1 RETURNING *`, [id],
+        ));
+        await asignarTurno(actual.turno_id, client);
+      }
       return rows[0];
     });
     res.json(aInscripcion(fila));

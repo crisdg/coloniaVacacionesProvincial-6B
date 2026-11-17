@@ -111,7 +111,8 @@ test('una falla del padrón libera la inscripción para otro intento', async () 
   const [id] = await sembrar();
   const antes = await estado();
   await assert.rejects(resolverInscripcion(id, async () => { throw new Error('Padrón caído'); }), /Padrón caído/);
-  assert.deepEqual(await estado(), antes);
+  const despues = await estado();
+  assert.deepEqual(despues.map(({ version, ...fila }) => fila), antes.map(({ version, ...fila }) => fila));
   assert.equal(await resolverInscripcion(id, async () => true), true);
   assert.equal((await estado())[0].estado, 'confirmada');
 });
@@ -144,6 +145,8 @@ test('al morir el consumidor otra réplica retoma la inscripción', { timeout: 1
   const { hijo, salida } = await iniciarReplica(t, id);
   hijo.kill('SIGKILL');
   await salida;
+  assert.equal(await resolverInscripcion(id, () => assert.fail('Reclamación vigente')), false);
+  await pool.query("UPDATE colonia.inscripciones SET padron_reclamado_hasta = clock_timestamp() - interval '1 second' WHERE id = $1", [id]);
   const limite = Date.now() + 2000;
   let resuelta;
   do {
@@ -155,32 +158,56 @@ test('al morir el consumidor otra réplica retoma la inscripción', { timeout: 1
   assert.equal((await estado())[0].estado, 'confirmada');
 });
 
-test('perder la sesión durante el padrón impide que el consumidor viejo guarde su resultado', { timeout: 10000 }, async () => {
+test('una reclamación vencida puede recuperarse y el dueño viejo no sobrescribe al sucesor', async () => {
   const [id] = await sembrar();
   const inicio = Promise.withResolvers();
   const continuar = Promise.withResolvers();
   const anterior = resolverInscripcion(id, async () => { inicio.resolve(); await continuar.promise; return true; });
-  const fallo = assert.rejects(anterior, /connection|Connection|closed|terminated|queryable/i);
   try {
     await inicio.promise;
-    const { rows: [lock] } = await pool.query(`SELECT pid FROM pg_locks
-      WHERE locktype = 'advisory' AND classid = 727003 AND objid = $1 AND objsubid = 2 AND granted`, [id]);
-    assert.ok(lock);
-    await pool.query('SELECT pg_terminate_backend($1)', [lock.pid]);
-    // Esperar a que PostgreSQL libere el lock, no a que el adaptador viejo termine.
-    let resuelta = false;
-    for (let i = 0; i < 100 && !resuelta; i++) {
-      resuelta = await resolverInscripcion(id, async () => false);
-      if (!resuelta) await new Promise(resolve => setTimeout(resolve, 10));
-    }
-    assert.equal(resuelta, true);
+    await pool.query("UPDATE colonia.inscripciones SET padron_reclamado_hasta = clock_timestamp() - interval '1 second' WHERE id = $1", [id]);
+    assert.equal(await resolverInscripcion(id, async () => false), true);
   } finally {
     continuar.resolve();
-    await fallo;
+    assert.equal(await anterior, false);
   }
   const [fila] = await estado();
   assert.equal(fila.estado, 'rechazada');
   assert.equal(fila.es_residente, false);
+});
+
+test('un resultado vencido se descarta aunque todavía no haya sucesor', async () => {
+  const [id] = await sembrar();
+  assert.equal(await resolverInscripcion(id, async () => {
+    await pool.query("UPDATE colonia.inscripciones SET padron_reclamado_hasta = clock_timestamp() - interval '1 second' WHERE id = $1", [id]);
+    return true;
+  }), false);
+  assert.equal((await estado())[0].es_residente, null);
+  assert.equal(await resolverInscripcion(id, async () => true), true);
+});
+
+for (const volver of [false, true]) {
+  test('una corrección invalida el resultado en vuelo, incluso volviendo al documento original: ' + volver, async () => {
+    const [id] = await sembrar();
+    assert.equal(await resolverInscripcion(id, async documento => {
+      await pool.query("UPDATE colonia.inscripciones SET documento = '96000001' WHERE id = $1", [id]);
+      if (volver) await pool.query('UPDATE colonia.inscripciones SET documento = $2 WHERE id = $1', [id, documento]);
+      return true;
+    }), false);
+    assert.equal((await estado())[0].es_residente, null);
+    assert.equal(await resolverInscripcion(id, async () => false), true);
+    assert.equal((await estado())[0].estado, 'rechazada');
+  });
+}
+
+test('cambiar el documento invalida una residencia ya guardada que esperaba orden', async () => {
+  const [, id] = await sembrar(2);
+  await resolverInscripcion(id, async () => true);
+  await pool.query("UPDATE colonia.inscripciones SET documento = '96000001' WHERE id = $1", [id]);
+  let consultas = 0;
+  await resolverInscripcion(id, async documento => { consultas++; assert.equal(documento, '96000001'); return false; });
+  assert.equal(consultas, 1);
+  assert.equal((await estado())[1].es_residente, false);
 });
 
 test('una cancelación durante la consulta no queda bloqueada ni se revierte por una respuesta tardía', async () => {
@@ -194,7 +221,7 @@ test('una cancelación durante la consulta no queda bloqueada ni se revierte por
   assert.equal(fila.es_residente, null);
 });
 
-test('ocupar el pool de consumidores no impide obtener permisos globales del padrón', { timeout: 15000 }, async () => {
+test('esperar al padrón no retiene conexiones ni impide obtener permisos globales', { timeout: 15000 }, async () => {
   const ids = await sembrar(10, 10);
   const { consultarPadron } = await import('../src/modules/inscripciones/padron.js');
   const todos = Promise.withResolvers();
@@ -207,8 +234,7 @@ test('ocupar el pool de consumidores no impide obtener permisos globales del pad
   }));
   try {
     await todos.promise;
-    assert.equal(poolConsumidor.idleCount, 0);
-    assert.equal(poolConsumidor.totalCount, 10);
+    assert.equal(poolConsumidor.idleCount, poolConsumidor.totalCount);
     await pool.query('SELECT 1');
   } finally {
     continuar.resolve();
@@ -264,5 +290,23 @@ test('una entrega en vuelo o fallida recibe NACK; una resuelta recibe ACK', asyn
       confirmar: (_canal, _msg, metodo) => confirmaciones.push(metodo),
     });
     assert.deepEqual(confirmaciones, [resultado === true ? 'ack' : 'nack']);
+  }
+});
+
+test('una consulta larga renueva su reclamación sin habilitar duplicados', { timeout: 30000 }, async () => {
+  const [id] = await sembrar();
+  const inicio = Promise.withResolvers();
+  const continuar = Promise.withResolvers();
+  const trabajo = resolverInscripcion(id, async () => { inicio.resolve(); await continuar.promise; return true; });
+  try {
+    await inicio.promise;
+    const { rows: [antes] } = await pool.query('SELECT padron_reclamado_hasta FROM colonia.inscripciones WHERE id = $1', [id]);
+    await new Promise(resolve => setTimeout(resolve, 21000));
+    const { rows: [despues] } = await pool.query('SELECT padron_reclamado_hasta FROM colonia.inscripciones WHERE id = $1', [id]);
+    assert.ok(despues.padron_reclamado_hasta > antes.padron_reclamado_hasta);
+    assert.equal(await resolverInscripcion(id, () => assert.fail('Consulta duplicada')), false);
+  } finally {
+    continuar.resolve();
+    await trabajo;
   }
 });

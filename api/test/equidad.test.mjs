@@ -363,3 +363,33 @@ test('una respuesta lenta del adaptador no permite adelantar a otra inscripción
   const { rows } = await pool.query('SELECT estado FROM colonia.inscripciones WHERE turno_id = $1 ORDER BY orden_recepcion', [turno]);
   assert.deepEqual(rows.map(fila => fila.estado), ['confirmada', 'en_lista_de_espera']);
 });
+
+test('una corrección administrativa guarda el nuevo padrón y descarta la consulta anterior', async () => {
+  const turno = await crearTurno();
+  const alta = await solicitar(turno, '97000001');
+  const { resolverInscripcion } = await import('../src/modules/inscripciones/consumidor.js');
+  const inicio = Promise.withResolvers();
+  const continuar = Promise.withResolvers();
+  const anterior = resolverInscripcion(alta.body.id, async () => {
+    inicio.resolve();
+    await continuar.promise;
+    return false;
+  });
+  try {
+    await inicio.promise;
+    const respuesta = await fetch(`${baseURL}/inscripciones/${alta.body.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'X-Usuario-Id': 'admin', 'X-Usuario-Roles': 'administrador' },
+      body: JSON.stringify({ chico: { documento: '97000003' } }),
+    });
+    assert.equal(respuesta.status, 200, JSON.stringify(await respuesta.json()));
+  } finally {
+    continuar.resolve();
+    assert.equal(await anterior, false);
+  }
+  const { rows: [fila] } = await pool.query('SELECT * FROM colonia.inscripciones WHERE id = $1', [alta.body.id]);
+  assert.equal(fila.documento, '97000003');
+  assert.equal(fila.es_residente, true);
+  assert.equal(fila.estado, 'confirmada');
+  await resolverInscripcion(alta.body.id, () => assert.fail('Resultado ya guardado'));
+});
