@@ -27,6 +27,11 @@ function token() {
   return sessionStorage.getItem(TOKEN_KEY);
 }
 
+function informarSesion(roles = []) {
+  sessionStorage.setItem('colonia.is_tutor', roles.includes('tutor') ? 'true' : 'false');
+  document.dispatchEvent(new CustomEvent('colonia:session', { detail: { roles } }));
+}
+
 async function ingresar() {
   const verifier = randomString();
   const state = randomString();
@@ -95,11 +100,19 @@ async function completarLogin() {
 async function llamar(path, options = {}) {
   const headers = { ...(options.headers ?? {}) };
   if (token()) headers.Authorization = `Bearer ${token()}`;
-  const response = await fetch(path, { ...options, headers });
+  
+  const response = await fetch(`http://localhost:8000${path}`, { ...options, headers });
   const texto = await response.text();
   let cuerpo = texto;
   try { cuerpo = JSON.stringify(JSON.parse(texto), null, 2); } catch { /* texto plano */ }
-  $('#resultado').textContent = `${response.status} ${response.statusText}\n${cuerpo}`;
+  
+  const resBox = $('#resultado');
+  resBox.style.display = 'block';
+  resBox.className = response.ok 
+    ? "mt-4 rounded-xl border border-emerald-200 bg-emerald-50/50 p-4 font-mono text-xs text-emerald-900 overflow-x-auto shadow-sm"
+    : "mt-4 rounded-xl border border-red-200 bg-red-50 p-4 font-mono text-xs text-red-900 overflow-x-auto shadow-sm";
+  
+  resBox.textContent = `Status: ${response.status} ${response.statusText}\n\n${cuerpo}`;
   return response;
 }
 
@@ -107,35 +120,62 @@ async function mostrarSesion() {
   const ingresarBtn = $('#ingresar');
   const salirBtn = $('#salir');
   const acciones = $('#acciones');
+  const crearTurnoBtn = $('#crear');
+  const resBox = $('#resultado');
+
   if (!token()) {
     $('#sesion').textContent = 'Sin sesión. Ingresá con ana (administrador) o beto (tutor).';
-    ingresarBtn.hidden = false;
-    salirBtn.hidden = true;
-    acciones.hidden = true;
+    if (ingresarBtn) ingresarBtn.hidden = false;
+    if (salirBtn) salirBtn.hidden = true;
+    if (acciones) acciones.hidden = true;
+    if (resBox) resBox.style.display = 'block';
+    informarSesion();
     return;
   }
-  ingresarBtn.hidden = true;
-  salirBtn.hidden = false;
-  acciones.hidden = false;
-  const response = await fetch('/api/yo', { headers: { Authorization: `Bearer ${token()}` } });
+  
+  if (ingresarBtn) ingresarBtn.hidden = true;
+  if (salirBtn) salirBtn.hidden = false;
+
+  const response = await fetch('http://localhost:8000/yo', { headers: { Authorization: `Bearer ${token()}` } });
   if (response.status === 401) {
     sessionStorage.removeItem(TOKEN_KEY);
     mostrarSesion();
     return;
   }
   const yo = await response.json();
+  const roles = response.ok ? yo.roles ?? [] : [];
+  informarSesion(roles);
+  
+  const esAdmin = roles.includes('administrador');
+  const esTutor = roles.includes('tutor');
+
+  // Usamos .hidden en lugar de style.display para respetar el atributo HTML
+  if (acciones) {
+    acciones.hidden = !esAdmin; // Visible solo para admin
+  }
+  
+  if (crearTurnoBtn) {
+    crearTurnoBtn.hidden = !esAdmin; // Visible solo para admin
+  }
+  
+  if (resBox && esTutor && !esAdmin) {
+    resBox.style.display = 'none'; // Oculto para tutor
+  } else if (resBox) {
+    resBox.style.display = 'block';
+  }
+
   $('#sesion').textContent = response.ok
-    ? `Sesión de ${yo.usuario}. Roles: ${(yo.roles ?? []).filter((rol) => rol === 'tutor' || rol === 'administrador').join(', ') || 'ninguno de colonia'}.`
+    ? `Sesión de ${yo.usuario}. Roles: ${roles.filter((rol) => rol === 'tutor' || rol === 'administrador').join(', ') || 'ninguno de colonia'}.`
     : 'No se pudo leer la sesión.';
 }
 
 async function listarTurnos() {
-  await llamar('/api/turnos');
+  await llamar('/turnos');
 }
 
 async function crearTurno() {
   const dentroDeDias = (dias) => new Date(Date.now() + dias * 86_400_000);
-  await llamar('/api/turnos', {
+  await llamar('/turnos', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -157,9 +197,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('#listar').addEventListener('click', () => { listarTurnos().catch((error) => { $('#resultado').textContent = error.message; }); });
   $('#crear').addEventListener('click', () => { crearTurno().catch((error) => { $('#resultado').textContent = error.message; }); });
 
+  const resBox = $('#resultado');
+  if (resBox) resBox.style.display = 'none';
+
   try {
     await completarLogin();
   } catch (error) {
+    $('#resultado').style.display = 'block';
     $('#resultado').textContent = error.message;
     history.replaceState({}, '', REDIRECT_URI);
   }
