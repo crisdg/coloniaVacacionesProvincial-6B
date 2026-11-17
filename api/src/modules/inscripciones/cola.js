@@ -2,6 +2,7 @@ import amqp from 'amqplib';
 import { pool, enTransaccion } from '../../db.js';
 import { asignarTurno } from './asignacion.js';
 import { consultarPadron } from './padron.js';
+import { publicarLoteSalida } from './outbox.js';
 
 const COLA = 'colonia.residencia';
 
@@ -36,17 +37,10 @@ async function publicarPendientes() {
   if (!canal || publicando) return;
   publicando = true;
   try {
-    const { rows } = await pool.query(
-      'SELECT id, inscripcion_id FROM colonia.salida WHERE publicado_en IS NULL ORDER BY id LIMIT 20',
-    );
-    for (const fila of rows) {
-      if (canalActual !== canal) return;
-      await publicar(canal, fila.inscripcion_id);
-      await pool.query(
-        'UPDATE colonia.salida SET publicado_en = clock_timestamp() WHERE id = $1 AND publicado_en IS NULL',
-        [fila.id],
-      );
-    }
+    await publicarLoteSalida(async (inscripcionId) => {
+      if (canalActual !== canal) throw new Error('El canal cambió antes de publicar.');
+      await publicar(canal, inscripcionId);
+    });
   } catch (error) {
     console.error('No se pudo publicar en la cola:', error.message);
   } finally {

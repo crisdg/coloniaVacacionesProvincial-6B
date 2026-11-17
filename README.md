@@ -141,6 +141,12 @@ Flujo funcional:
 
 Estados: `pendiente_de_validacion`, `confirmada`, `en_lista_de_espera`, `rechazada` y `cancelada`. Los dos últimos son finales.
 
+Los publicadores del outbox se coordinan en PostgreSQL con `FOR UPDATE SKIP LOCKED`: cada uno bloquea una fila pendiente, espera el confirm de RabbitMQ y marca `publicado_en` dentro de la misma transacción. Las otras réplicas omiten esa fila y pueden publicar otras. Se procesan hasta 20 mensajes por ciclo, con una transacción por mensaje; una falla no revierte las publicaciones anteriores. No se necesitan leases ni una migración nueva.
+
+Esta elección mantiene una conexión a PostgreSQL y el bloqueo de esa fila mientras espera el confirm (timeout de 5 segundos). Si falla la publicación, se revierte la transacción; si termina el proceso, PostgreSQL libera el bloqueo al detectar la desconexión y otra réplica puede retomar el mensaje. La entrega sigue siendo **al menos una vez**: si RabbitMQ acepta el mensaje pero se pierde el confirm o falla el marcado/commit, puede publicarse de nuevo. La coordinación evita que réplicas sanas publiquen simultáneamente la misma fila; no convierte PostgreSQL y RabbitMQ en una transacción distribuida. El consumidor debe tolerar reentregas. El orden de publicación entre réplicas puede variar; la equidad depende del orden durable de admisión y del asignador, no del orden de la cola.
+
+Para desplegar este cambio, detener los publicadores anteriores y arrancar todas las réplicas con la nueva versión. Una réplica vieja que consulta sin bloquear no participa de esta coordinación.
+
 La prioridad se define en la admisión al sistema, no en el clic del navegador ni en la llegada al gateway. Dentro de un turno, recepción, asignación, cancelación y cambios de cupo usan el mismo bloqueo: una solicitud posterior no puede obtener una plaza mientras una anterior con orden asignado todavía se está guardando. El bloqueo dura hasta commit o rollback y nunca abarca la consulta al padrón. Otros turnos pueden avanzar independientemente. `ordenRecepcion` es global e inmutable, puede tener saltos y no representa la posición actual en la lista de espera. Si el período cierra mientras una solicitud espera el bloqueo de admisión, se rechaza con 409.
 
 Las correcciones administrativas corresponden al mismo chico y conservan identificador, turno, convocatoria y orden original. Vuelven a comprobar la edad a la **fecha original de inscripción**. Si cambia el DNI, la residencia se valida antes de aceptar el cambio. No permiten cambiar libremente el estado ni corregir una inscripción cancelada o rechazada.
@@ -235,6 +241,14 @@ docker compose -f docker-compose.yml -f docker-compose.auth.yml run --rm --no-de
 ```
 
 Esta suite verifica el cambio de segundo, la limpieza de vencidos, las reservas concurrentes y el límite observado en los inicios reales del adaptador entre procesos. No representa una prueba de carga provincial ni una medición de la recepción de paquetes en un padrón HTTP externo.
+
+Para probar la coordinación del outbox con PostgreSQL y RabbitMQ reales, usando una base temporal y una cola exclusiva que se eliminan al finalizar:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.auth.yml run --rm --no-deps -v ./api/src:/app/src:ro -v ./api/test:/app/test:ro -v ./api/migrations:/app/migrations:ro api node --test test/outbox.test.mjs
+```
+
+Comprueba exclusión entre publicadores, progreso mientras una fila espera confirmación, rollback por fallo del broker, conservación de mensajes ya marcados, recuperación tras terminar otra réplica y confirms reales sin duplicados en el caso sin fallas. También fuerza un error al marcar después de publicar para demostrar la reentrega esperable con la garantía de al menos una vez.
 
 Para verificar CORS y el reenvío de la clave en el gateway con JWT/JWKS de prueba y una API simulada, sin iniciar Keycloak ni modificar datos:
 
