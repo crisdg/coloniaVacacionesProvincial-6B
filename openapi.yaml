@@ -2,7 +2,7 @@ openapi: "3.0.3"
 info:
   title: "Colonia de Vacaciones Provincial"
   version: "0.5.0"
-  description: "Contrato de Colonia de Vacaciones Provincial. La autenticación está delegada en Keycloak (OIDC, Authorization Code + PKCE) y la autorización es RBAC: el tutor consulta turnos, inscribe y consulta sus inscripciones; el administrador gestiona turnos, cupos y las inscripciones. El gateway valida firma, emisor, audiencia y vencimiento. Sin token responde 401; con un rol que no alcanza, 403, ambos con Problem Details. GET /health es público. Turnos e inscripciones están implementados sobre PostgreSQL. La solicitud se guarda y responde 202 en pendiente_de_validacion; una cola consulta el padrón simulado con tope global de 50 consultas por segundo y después asigna el cupo en orden de recepción. Un DNI que termina en 0 no reside en la jurisdicción. Reservas provisionales, revisión de 48 horas y prórrogas quedan fuera del alcance."
+  description: "Contrato de Colonia de Vacaciones Provincial. El tutor consulta turnos, inscribe y consulta sus inscripciones. El administrador gestiona turnos, cupos e inscripciones. Sin token responde 401; con un rol que no alcanza, 403. GET /health es público. La solicitud de inscripción responde 202 en pendiente_de_validacion. La residencia se valida después y el cupo se asigna en orden de recepción."
 servers:
   -
     url: "/api"
@@ -24,7 +24,7 @@ paths:
         - "Infraestructura"
       operationId: "obtenerSalud"
       summary: "Comprobar API y conexión a PostgreSQL"
-      description: "Implementado. Comprueba la API y PostgreSQL. No incluye la cola: si el broker no está, las solicitudes igual se guardan y se publican cuando vuelve."
+      description: "Comprueba la API y la conexión con PostgreSQL."
       responses:
         "200":
           description: "API y base disponibles."
@@ -161,7 +161,18 @@ paths:
         - "Inscripciones"
       operationId: "crearInscripcion"
       summary: "Inscribir a un chico en un turno"
-      description: "Rol: tutor. El tutor sale del token. Requiere período abierto (apertura inclusiva y cierre exclusivo; si no, 409) y edad de 6 a 12 años inclusive al registrar la solicitud, con la fecha del servidor en America/Argentina/Buenos_Aires (si no, 400). Una sola inscripción activa por DNI y convocatoria, incluso entre turnos y sedes diferentes y con pedidos concurrentes (si no, 409). La convocatoria se obtiene del turno. Registra la solicitud y su orden antes de responder 202 con estado pendiente_de_validacion. Una nueva solicitud tras cancelación o rechazo recibe nuevo orden. Después, la cola consulta el padrón simulado con límite global de 50 consultas por segundo, incluidos los reintentos. Confirma solo a quien reside en la jurisdicción y no adelanta solicitudes anteriores pendientes del mismo turno. Una falla técnica deja la solicitud pendiente."
+      description: "Rol: tutor. El tutor sale del token. Requiere período abierto (apertura inclusiva y cierre exclusivo; si no, 409) y edad de 6 a 12 años inclusive al registrar la solicitud, con la fecha del servidor en America/Argentina/Buenos_Aires (si no, 400). Una sola inscripción activa por DNI y convocatoria, incluso entre turnos y sedes diferentes y con pedidos concurrentes (si no, 409). La convocatoria se obtiene del turno. Responde 202 con estado pendiente_de_validacion y el orden de recepción; todavía no confirma cupo. Una nueva solicitud tras cancelación o rechazo recibe nuevo orden. Confirma solo a quien reside en la jurisdicción y no adelanta solicitudes anteriores pendientes del mismo turno. Una falla técnica deja la solicitud pendiente."
+      parameters:
+        - name: "Idempotency-Key"
+          in: "header"
+          required: false
+          description: "Clave generada por el cliente para esta solicitud y reutilizada en sus reintentos. Se asocia al tutor autenticado. Misma clave y datos normalizados devuelve el 202, cuerpo y Location originales, incluso si cambió el estado o cerró el período; consultar GET para el estado actual. Misma clave con otros datos devuelve 409. Los errores no guardan la clave. Sin este header se mantiene la unicidad por DNI, pero no se recupera la respuesta original. Una nueva solicitud tras cancelación o rechazo requiere una clave nueva. Las claves aceptadas no expiran automáticamente."
+          schema:
+            type: "string"
+            minLength: 1
+            maxLength: 128
+            pattern: "^[A-Za-z0-9._:-]{1,128}$"
+          example: "d42a7862-2a20-44d8-85e0-f0ea516ac77c"
       requestBody:
         required: true
         content:
@@ -170,7 +181,7 @@ paths:
               "$ref": "#/components/schemas/InscripcionNueva"
       responses:
         "202":
-          description: "Solicitud recibida y persistida, pendiente de validar residencia; todavía no confirma cupo."
+          description: "Aceptación original persistida, pendiente de validar residencia; todavía no confirma cupo. Un reintento idempotente reproduce esta respuesta, no el estado actual de la inscripción."
           content:
             application/json:
               schema:
@@ -214,8 +225,6 @@ paths:
                 type: "array"
                 items:
                   "$ref": "#/components/schemas/Inscripcion"
-        "400":
-          "$ref": "#/components/responses/Invalido"
         "500":
           "$ref": "#/components/responses/ErrorInterno"
         "401":
@@ -357,7 +366,7 @@ components:
           type: "integer"
           minimum: 1
           example: 1
-          description: "Sede del catálogo precargado. No implica un módulo ni un CRUD adicional."
+          description: "Sede del catálogo precargado."
         nombre:
           type: "string"
           minLength: 1
@@ -442,7 +451,7 @@ components:
           type: "integer"
           minimum: 1
           example: 1
-          description: "Sede del catálogo precargado. No implica un módulo ni un CRUD adicional."
+          description: "Sede del catálogo precargado."
         id:
           type: "integer"
           minimum: 1
@@ -495,7 +504,7 @@ components:
           type: "string"
           pattern: "^[0-9]{7,8}$"
           example: "55123456"
-          description: "DNI argentino, sin puntos. Identifica al chico para comprobar unicidad de inscripción activa en toda la convocatoria. El padrón simulado responde que no reside en la jurisdicción de la convocatoria si el número termina en 0."
+          description: "DNI argentino, sin puntos. Identifica al chico para la unicidad de inscripción activa en la convocatoria."
         nombre:
           type: "string"
           minLength: 1
@@ -546,7 +555,7 @@ components:
         ordenRecepcion:
           type: "integer"
           minimum: 1
-          description: "Orden inmutable de recepción durable en el servidor, asignado antes de consultar el padrón. Se usa para asignar plazas dentro del turno sin adelantar solicitudes anteriores pendientes. No es la posición actual en espera."
+          description: "Orden global e inmutable de admisión durable, generado bajo el bloqueo del turno antes de consultar el padrón. Puede tener saltos. Se usa para asignar plazas dentro del turno sin adelantar solicitudes anteriores pendientes o todavía en proceso de persistencia. No representa el momento del clic, la llegada al gateway ni la posición actual en espera."
         creadoEn:
           type: "string"
           format: "date-time"
@@ -594,7 +603,6 @@ components:
       required:
         - "status"
         - "database"
-        - "stage"
       properties:
         status:
           type: "string"
@@ -604,10 +612,6 @@ components:
           type: "string"
           enum:
             - "ok"
-        stage:
-          type: "string"
-          enum:
-            - "esqueleto"
     ProblemDetails:
       type: "object"
       required:
@@ -659,7 +663,7 @@ components:
             detail: "El recurso no existe."
             instance: "/turnos"
     Conflicto:
-      description: "Ya existe una inscripción activa del chico en la convocatoria, inscripción en estado final, período cerrado o cupo inferior a los confirmados. La falta de cupo genera lista de espera, no conflicto."
+      description: "Ya existe una inscripción activa del chico en la convocatoria, inscripción en estado final, período cerrado, cupo inferior a los confirmados o Idempotency-Key reutilizada con otros datos. La falta de cupo genera lista de espera, no conflicto."
       content:
         "application/problem+json":
           schema:

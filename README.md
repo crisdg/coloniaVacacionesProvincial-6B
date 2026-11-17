@@ -68,7 +68,19 @@ Keycloak importa `auth/keycloak/realm-colonia.json` solo si el volumen `colonia_
 - `cola`: RabbitMQ, sin puerto publicado, con healthcheck y volumen `colonia_rabbitmq`. La API publica y consume la cola durable `colonia.residencia` por el exchange por defecto: un mensaje lo toma un solo consumidor.
 - `swagger-ui`: muestra `openapi.yaml`, se autoriza contra Keycloak y reenvía `/api/` al gateway.
 
-El padrón provincial está simulado dentro de la API: un DNI que termina en `0` no reside en la jurisdicción de la convocatoria; el resto sí. Cada consulta, también un reintento, toma un cupo de la tabla `colonia.consultas_padron`. El tope es **50 por segundo en total**, compartido por todos los procesos de la API. Si la consulta falla, la inscripción sigue en `pendiente_de_validacion` y el mensaje se vuelve a encolar.
+El padrón provincial está simulado dentro de la API: un DNI que termina en `0` no reside en la jurisdicción de la convocatoria; el resto sí. Cada consulta, también un reintento o una corrección administrativa, necesita un permiso global registrado en `colonia.permisos_padron`. El límite es **como máximo 50 inicios de consulta en una ventana móvil de un segundo**, compartido por todas las réplicas conectadas a la misma base. No se reinicia el cupo al cambiar de segundo ni al reiniciar un proceso. Si la consulta falla, la inscripción sigue en `pendiente_de_validacion` y el mensaje se vuelve a encolar.
+
+La concesión usa el reloj de PostgreSQL y un bloqueo asesor transaccional compartido: cuenta los permisos vigentes, elimina los vencidos y registra uno nuevo si hay lugar. Todas esas operaciones ocurren bajo el mismo bloqueo. Si está lleno, devuelve cuánto falta para que venza el más antiguo; se espera fuera de la transacción y se vuelve a comprobar. La consulta externa también ocurre fuera del bloqueo. Si PostgreSQL falla, no se consulta el padrón sin permiso.
+
+Un permiso debe usarse antes de 100 ms, medidos con reloj monotónico desde **antes** de solicitarlo. Si llegó tarde por red, bloqueo o pausa del proceso, el cliente lo descarta y solicita otro; no lo reintegra. PostgreSQL conserva cada permiso durante 1.100 ms (ventana de 1.000 ms más margen de vigencia). Así se cubre el desfase entre concesión e inicio del adaptador, que se invoca directamente al verificar la vigencia, sin otra espera intermedia. La garantía se refiere al inicio de la llamada al adaptador: un futuro adaptador HTTP debe iniciar el pedido inmediatamente, sin agregar una cola interna antes del envío. La latencia de transporte hasta un proveedor real requiere además verificar su propia política de tasa.
+
+Este margen es deliberadamente conservador: el máximo teórico sostenido es aproximadamente **45,5 consultas/s** con la configuración de 50; puede ser menor si se descartan permisos o hay errores. Se prioriza no sobrepasar el límite antes que aprovechar cada consulta disponible. La variable `PADRON_CONSULTAS_POR_SEGUNDO` se valida al arrancar: admite enteros de 1 a 50, usa 50 si no está definida y rechaza valores inválidos o mayores, sin reemplazarlos silenciosamente. Todas las réplicas deben usar el mismo valor. El límite regula la tasa global, no garantiza equidad entre consumidores; la prioridad de cupos sigue resolviéndose por turno en la base.
+
+La integración está separada en `padron-limite.js` (permisos globales en PostgreSQL), `padron-cliente.js` (esperar permiso y consultar) y `padron-simulado.js` (adaptador de residencia). `padron.js` compone esas piezas y conserva la función `consultarPadron` usada por las rutas y el consumidor. El adaptador recibe documento, jurisdicción y una opción `signal` para cancelación cooperativa, devuelve `true`/`false` o lanza un error técnico; una respuesta inválida también es error, nunca rechazo por residencia.
+
+Las pruebas crean instancias del simulador con una secuencia de escenarios: `{ demoraMs: 500 }`, `{ error: 'NO_DISPONIBLE' }` o `{ error: 'SATURADO', reintentarEnMs: 2500 }`. Se consumen por orden de inicio de llamada, sin azar ni configuración global; al agotarse vuelve la regla normal del DNI. Se puede inyectar una espera controlada para liberar la respuesta desde la prueba sin dormir realmente. La demo usa una instancia sin escenarios de falla y no expone endpoints para activarlos.
+
+`SATURADO` simula el rechazo externo por tasa (equivalente a HTTP 429), distinto de `LIMITE_LOCAL` al agotar el presupuesto de espera del regulador. `reintentarEnMs` se respeta como espera mínima ante saturación. `esperaMaximaMs` limita la obtención de un permiso vigente, incluido el tiempo de consulta a PostgreSQL. La consulta externa tiene un timeout de 10 segundos; el consumidor limita a 30 segundos el intento completo, incluida la espera de permisos. Ambos límites envían una señal de cancelación y descartan respuestas tardías aunque el adaptador la ignore.
 
 Las conexiones **entre servicios** usan nombres DNS de Compose. `localhost` se usa solo en las URLs del navegador; el healthcheck de la API usa loopback para comprobar el propio contenedor, no para conectarse a otro servicio.
 
@@ -93,6 +105,14 @@ Operaciones de inscripciones:
 - `PATCH /inscripciones/{id}`: corregir datos del mismo chico, sin cambiar turno, estado ni orden (administrador). Si cambia el DNI, el padrón se consulta antes de aceptar: sin residencia responde 409 y el DNI anterior queda igual; si el padrón no responde, 503.
 - `POST /inscripciones/{id}/cancelaciones`: cancelar con motivo obligatorio (administrador).
 
+`POST /inscripciones` acepta el header opcional `Idempotency-Key` (de 1 a 128 caracteres: letras ASCII, números, `.`, `_`, `:`, `-`). El cliente genera una clave por solicitud, por ejemplo un UUID, y la conserva si pierde la respuesta o necesita reintentar. El gateway permite y reenvía ese header.
+
+La clave se asocia al tutor autenticado y al contenido validado de la solicitud. La misma clave con los mismos datos normalizados devuelve el `202`, cuerpo y `Location` originales, incluidos `id` y `ordenRecepcion`; otros datos con esa clave devuelven `409`. El orden de los campos JSON no importa y los textos se comparan después del recorte de espacios de la validación habitual. Una clave inválida devuelve `400`.
+
+La reserva de clave, inscripción, outbox y respuesta original se guardan en una sola transacción. La clave primaria `(tutor_id, clave)` coordina reintentos concurrentes entre réplicas antes de bloquear el turno. Si la operación falla, todo se revierte y la clave puede reintentarse. Las aceptaciones se conservan sin expiración automática: esa persistencia consume espacio, pero evita que un reintento tardío se interprete como una nueva admisión. No se eliminan claves en este avance.
+
+El reintento recupera la aceptación original incluso si cerró el período o la inscripción fue corregida, confirmada, rechazada o cancelada. Para el estado actual se usa `GET /inscripciones/{id}`. Una solicitud nueva después de cancelación o rechazo usa otra clave. Sin header se mantiene el comportamiento anterior: otro POST para un DNI activo devuelve `409`. Una clave distinta nunca permite eludir la unicidad por DNI y convocatoria.
+
 Operación técnica:
 
 - `GET /health`: responde 200 si API y PostgreSQL están disponibles, o 503 si falla la comprobación de la base.
@@ -113,13 +133,40 @@ Implementado: roles, titularidad, edad, período, unicidad por DNI y convocatori
 Flujo funcional:
 
 1. El tutor elige un turno. El sistema comprueba datos, edad, período abierto y ausencia de inscripción activa en la convocatoria. Estas validaciones y la unicidad deben mantenerse también con solicitudes concurrentes.
-2. Se guarda durablemente la solicitud, su orden de recepción y un mensaje en `colonia.salida`, en la misma transacción. Se responde `202 Accepted` con estado `pendiente_de_validacion` y la ubicación para consultar el resultado. Esto no confirma un cupo. Si RabbitMQ no está, el mensaje queda en la bandeja y se publica cuando el broker vuelve.
-3. La cola procesa la validación de residencia sin superar **50 consultas por segundo en total**, aunque existan varios consumidores. Una falla técnica mantiene la solicitud pendiente para reintentar; no equivale a un rechazo.
+2. La admisión bloquea el turno antes de generar el orden y guarda durablemente la solicitud y un mensaje en `colonia.salida`, en la misma transacción. Comprueba las fechas vigentes del turno y toma la hora de PostgreSQL después de obtener ese bloqueo. Se responde `202 Accepted` con estado `pendiente_de_validacion`, `ordenRecepcion` y la ubicación para consultar el resultado. Esto no confirma un cupo. Si RabbitMQ no está, el mensaje queda en la bandeja y se publica cuando el broker vuelve.
+3. La cola procesa la validación de residencia con el regulador global de **hasta 50 inicios de consulta en cualquier ventana móvil de un segundo**, aunque existan varios consumidores. Una falla técnica mantiene la solicitud pendiente para reintentar; no equivale a un rechazo.
 4. Si reside en la jurisdicción, se asigna cupo de forma transaccional respetando el orden. Queda `confirmada` si corresponde una plaza, o `en_lista_de_espera` si no alcanza el cupo. Si el padrón determina que no reside, queda `rechazada`, con motivo.
 5. Una respuesta rápida del padrón no permite adelantar solicitudes anteriores pendientes del mismo turno. La asignación posterior de ese turno espera su resolución; no se implementan reservas temporales ni plazos de corrección. Los otros turnos pueden continuar. Esta elección protege la equidad a costa de demorar confirmaciones si el padrón falla.
 6. Al aumentar el cupo o cancelar una confirmada, se continúa asignando en orden. Cancelar una pendiente o una inscripción en espera no libera una plaza ocupada. Una solicitud cancelada no puede confirmarse por un resultado tardío del padrón.
 
 Estados: `pendiente_de_validacion`, `confirmada`, `en_lista_de_espera`, `rechazada` y `cancelada`. Los dos últimos son finales.
+
+Los publicadores del outbox se coordinan en PostgreSQL con `FOR UPDATE SKIP LOCKED`: cada uno bloquea una fila pendiente, espera el confirm de RabbitMQ y marca `publicado_en` dentro de la misma transacción. Las otras réplicas omiten esa fila y pueden publicar otras. Se procesan hasta 20 mensajes por ciclo, con una transacción por mensaje; una falla no revierte las publicaciones anteriores. No se necesitan leases ni una migración nueva.
+
+Esta elección mantiene una conexión a PostgreSQL y el bloqueo de esa fila mientras espera el confirm (timeout de 5 segundos). Si falla la publicación, se revierte la transacción; si termina el proceso, PostgreSQL libera el bloqueo al detectar la desconexión y otra réplica puede retomar el mensaje. La entrega sigue siendo **al menos una vez**: si RabbitMQ acepta el mensaje pero se pierde el confirm o falla el marcado/commit, puede publicarse de nuevo. La coordinación evita que réplicas sanas publiquen simultáneamente la misma fila; no convierte PostgreSQL y RabbitMQ en una transacción distribuida. El consumidor debe tolerar reentregas. El orden de publicación entre réplicas puede variar; la equidad depende del orden durable de admisión y del asignador, no del orden de la cola.
+
+Para desplegar este cambio, detener los publicadores anteriores y arrancar todas las réplicas con la nueva versión. Una réplica vieja que consulta sin bloquear no participa de esta coordinación.
+
+El consumidor reclama cada inscripción con un token UUID y un vencimiento durable de 60 segundos (migración `005_reclamacion_padron.sql`). La adquisición es un UPDATE condicional atómico: una entrega duplicada con reclamación vigente recibe NACK y se reencola. El dueño renueva cada 20 segundos, solo si conserva el token y la reclamación no venció. No retiene conexiones ni transacciones durante la consulta externa.
+
+Si el proceso cae, otra entrega puede recuperar la inscripción al vencer la reclamación. El resultado solo se guarda si el token sigue siendo el actual, no venció y la inscripción sigue pendiente. Un trigger invalida la reclamación ante cancelaciones o cambios de datos, incluso si luego se vuelve al valor original. Si cambia el documento, turno o convocatoria, también invalida la residencia guardada; las correcciones administrativas guardan después el resultado recién consultado dentro de la misma transacción. El dueño anterior tampoco puede liberar la reclamación de su sucesor. La residencia ya guardada para esa inscripción y documento se reutiliza sin consultar ni asignar nuevamente, incluso mientras espera orden.
+
+Residencia y asignación se confirman juntas antes del ACK. Un resultado descartado conserva el mensaje para reentrega. Una falla técnica libera su propia reclamación si la base está disponible; de otro modo vence sola. Los reintentos se programan durablemente como se describe a continuación.
+
+La reclamación evita consultas duplicadas mientras está vigente. Después de un vencimiento puede quedar una petición externa vieja en vuelo: sin cancelación cooperativa del padrón no se promete exactamente una vez; el token impide que su resultado tenga efectos. Las reentregas posteriores al commit no repiten el procesamiento. Para desplegar esta migración hay que reemplazar todos los consumidores anteriores, que coordinaban mediante advisory locks.
+
+
+La migración `006_reintentos_padron.sql` agrega `padron_intentos`, `padron_ultimo_intento_en`, `padron_proximo_intento_en` y `padron_ultimo_error`. Cada reclamación incrementa el contador y guarda una fecha inicial de recuperación antes de consultar, de modo que una caída también queda registrada. Las entregas duplicadas o anticipadas no incrementan intentos ni consultan al padrón. El contador es acumulativo para la inscripción y no se reinicia después del éxito o de una corrección.
+
+Ante una falla técnica se guarda una espera de 1, 2, 4, 8… segundos hasta un máximo de 60 segundos. Ante saturación se toma el mayor entre esa espera y `reintentarEnMs` (que puede superar los 60 segundos). No se abandona automáticamente una solicitud por cantidad de intentos: permanece pendiente y conserva su orden. Solo el dueño vigente puede registrar la falla. Si falla esa escritura, no hay ACK y permanece la planificación guardada al reclamar; si se pierde el proceso, también debe vencer su reclamación antes de recuperarlo. Una corrección invalida la espera del trabajo anterior; el éxito limpia próxima fecha y último error.
+
+RabbitMQ conserva el mensaje hasta completar el procesamiento durable. Se mantiene NACK con reencolado y una pausa de un segundo para entregas pendientes; la base impide consultar antes de la fecha programada, incluso en otra réplica o después de reiniciar. Esa pausa limita el ciclo de reentregas, pero no es el calendario del reintento ni elimina su costo en RabbitMQ/PostgreSQL. No se confirma un error con ACK ni se depende de un temporizador en memoria para conservar la solicitud. El cierre de un canal reencola mensajes sin ACK; una reentrega después del commit reutiliza el resultado guardado. Ver [Consumer Acknowledgements and Publisher Confirms de RabbitMQ](https://www.rabbitmq.com/docs/confirms).
+
+La prioridad se define en la admisión al sistema, no en el clic del navegador ni en la llegada al gateway. Dentro de un turno, recepción, asignación, cancelación y cambios de cupo usan el mismo bloqueo: una solicitud posterior no puede obtener una plaza mientras una anterior con orden asignado todavía se está guardando. El bloqueo dura hasta commit o rollback y nunca abarca la consulta al padrón. Otros turnos pueden avanzar independientemente. `ordenRecepcion` es global e inmutable, puede tener saltos y no representa la posición actual en la lista de espera. Si el período cierra mientras una solicitud espera el bloqueo de admisión, se rechaza con 409.
+
+El asignador usa la primera residencia desconocida como límite de avance. Con el turno bloqueado, selecciona por orden solo tantas candidatas como plazas disponibles y clasifica en bloque los resultados nuevos anteriores a ese límite. Las inscripciones que ya esperan y no obtienen plaza no se recorren ni bloquean. La migración `007_indices_asignacion.sql` agrega índices parciales para la primera validación pendiente, las candidatas a cupo y los resultados pendientes de clasificar; el conteo de confirmadas aprovecha el índice existente por turno y estado. Se conserva el bloqueo del turno y no se usa `SKIP LOCKED`, porque saltar una solicitud rompería la equidad.
+
+La asignación se completa en la misma transacción, sin cortar en lotes que dependan de otro mensaje para continuar. El trabajo sigue siendo proporcional a las filas que realmente cambian y a las confirmadas que se cuentan; un aumento grande de cupo o liberar muchas validaciones juntas todavía puede requerir una transacción grande. Los índices agregan almacenamiento y mantenimiento en las escrituras.
 
 Las correcciones administrativas corresponden al mismo chico y conservan identificador, turno, convocatoria y orden original. Vuelven a comprobar la edad a la **fecha original de inscripción**. Si cambia el DNI, la residencia se valida antes de aceptar el cambio. No permiten cambiar libremente el estado ni corregir una inscripción cancelada o rechazada.
 
@@ -136,6 +183,8 @@ Las reservas provisionales por correcciones, el plazo de 48 horas y las prórrog
 `.env.example` contiene nombres de variables y valores no secretos. `.env` está excluido por `.gitignore`. Si esta carpeta todavía no tiene Git inicializado, estas exclusiones se aplicarán cuando se cree el repositorio.
 
 `db/init.sql` crea únicamente el esquema `colonia` y solo corre cuando el volumen está vacío. El modelo está en `api/migrations/`: la API aplica al arrancar las migraciones que falten y las registra en `colonia.migraciones`, así funciona también con un volumen existente. Una migración nueva se agrega como otro archivo numerado, sin editar las ya aplicadas.
+
+La migración `004_ventana_padron.sql` reemplaza el contador técnico por el registro de permisos; no modifica inscripciones. Para esta transición hay que detener todas las APIs/consumidores anteriores, esperar al menos 1,1 segundos desde su última consulta al padrón y luego arrancar la versión nueva. No admite mezclar versiones viejas y nuevas durante el despliegue. Los reinicios posteriores conservan los permisos en PostgreSQL y no requieren vaciar la tabla.
 
 Modificar credenciales en `.env` no actualiza automáticamente las credenciales ya almacenadas por PostgreSQL o RabbitMQ.
 
@@ -186,6 +235,56 @@ docker compose -f docker-compose.yml -f docker-compose.auth.yml run --rm --no-de
 
 Cubren alta y actualización de turnos, alta de inscripciones, unicidad con pedidos concurrentes, titularidad, corrección, cancelación, rechazo por residencia, lista de espera, promoción por cupo o cancelación, el orden de asignación y los errores 400, 404 y 409.
 
+Las pruebas de concurrencia de admisión usan las fuentes locales y una base temporal que se crea y elimina automáticamente (requieren permiso `CREATEDB`, disponible con el usuario del Compose local):
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.auth.yml run --rm --no-deps -v ./api/src:/app/src:ro -v ./api/test:/app/test:ro -v ./api/migrations:/app/migrations:ro api node --test --test-concurrency=1 test/equidad.test.mjs test/asignacion.test.mjs
+```
+
+Fuerzan una pausa antes de que la primera inscripción sea visible y comprueban prioridad, independencia entre turnos y revalidación del período ante un cambio concurrente. Ejecutan rutas y asignador reales; no inician el consumidor de RabbitMQ y simulan residencia favorable para aislar la coordinación transaccional.
+
+La suite del asignador compara sus resultados con el recorrido anterior en 24 escenarios y verifica continuidad después de cancelar la primera pendiente y aumentar cupo. También usa `FOR UPDATE NOWAIT` para comprobar que no bloquea filas sin cambios y `EXPLAIN (ANALYZE, BUFFERS)` para comparar trabajo real. En una ejecución local con 5.000 en espera, una validación nueva y una plaza libre, el SELECT anterior registró 6.483 accesos a buffers frente a 67 para todas las consultas del asignador nuevo. Es una medición de ese escenario, no una prueba de capacidad de producción; la prueba exige una reducción de al menos la mitad, sin fijar tiempos de ejecución.
+
+La misma suite también prueba reintentos idempotentes concurrentes, conflictos de contenido, aislamiento por tutor, respuesta original después de cancelación/cierre, validación del header y rollback completo ante una falla del outbox.
+
+Además, ejecuta el procesador real `resolverInscripcion` con un cliente de padrón inyectado y permisos reales de PostgreSQL. Verifica errores transitorios, saturación, conservación del orden, consumo de permiso en cada intento y una respuesta lenta que no permite adelantar a otra inscripción. Estas pruebas invocan explícitamente cada intento; no demuestran todavía recuperación automática ni backoff del broker.
+
+Las pruebas del cliente y del simulador no necesitan Docker, credenciales ni PostgreSQL:
+
+```powershell
+node --test api/test/padron.test.mjs api/test/padron-reintentos.test.mjs
+```
+
+Para probar la ventana móvil con PostgreSQL real y tres procesos independientes, en una base temporal que se elimina al finalizar:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.auth.yml run --rm --no-deps -v ./api/src:/app/src:ro -v ./api/test:/app/test:ro -v ./api/migrations:/app/migrations:ro api node --test test/padron-limite.test.mjs
+```
+
+Esta suite verifica el cambio de segundo, la limpieza de vencidos, las reservas concurrentes y el límite observado en los inicios reales del adaptador entre procesos. No representa una prueba de carga provincial ni una medición de la recepción de paquetes en un padrón HTTP externo.
+
+Para probar la coordinación del outbox con PostgreSQL y RabbitMQ reales, usando una base temporal y una cola exclusiva que se eliminan al finalizar:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.auth.yml run --rm --no-deps -v ./api/src:/app/src:ro -v ./api/test:/app/test:ro -v ./api/migrations:/app/migrations:ro api node --test test/outbox.test.mjs
+```
+
+Comprueba exclusión entre publicadores, progreso mientras una fila espera confirmación, rollback por fallo del broker, conservación de mensajes ya marcados, recuperación tras terminar otra réplica y confirms reales sin duplicados en el caso sin fallas. También fuerza un error al marcar después de publicar para demostrar la reentrega esperable con la garantía de al menos una vez.
+
+Para probar reentregas del consumidor con PostgreSQL y RabbitMQ reales, una base temporal y una cola exclusiva:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.auth.yml run --rm --no-deps -v ./api/src:/app/src:ro -v ./api/test:/app/test:ro -v ./api/migrations:/app/migrations:ro api node --test test/consumidor.test.mjs
+```
+
+Verifica exclusión entre procesos, reentrega después de commit sin ACK, NACK ante trabajo en vuelo o fallido, ausencia de nuevas consultas/escrituras para resultados persistidos, recuperación tras caída del proceso o pérdida de sesión, rollback de residencia y asignación, cancelación concurrente y permisos del padrón con las 10 conexiones de consumo ocupadas. Las fallas antes del commit muestran el límite de la garantía: la consulta al padrón puede repetirse, pero no se guarda un resultado parcial ni se duplica el cupo.
+
+Para verificar CORS y el reenvío de la clave en el gateway con JWT/JWKS de prueba y una API simulada, sin iniciar Keycloak ni modificar datos:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.auth.yml run --rm --no-deps -v ./auth/gateway/src:/app/src:ro -v ./auth/gateway/test:/app/test:ro gateway node --test test/idempotencia.test.mjs
+```
+
 ## Checklist del avance
 
 - [x] Un servicio por contenedor del C4: frontend, API, base y cola.
@@ -201,7 +300,7 @@ Cubren alta y actualización de turnos, alta de inscripciones, unicidad con pedi
 - [x] 401 y 403 con Problem Details, y `securitySchemes` en `openapi.yaml`.
 - [x] La API no publica puerto. La contraseña de admin de Keycloak está en `.env`.
 - [x] Turnos e inscripciones persistidos en PostgreSQL, con migraciones y pruebas de contrato.
-- [x] Cola y padrón simulado con tope de 50 consultas por segundo; asignación de cupo en orden.
+- [x] Cola y padrón simulado con ventana móvil global de hasta 50 inicios por segundo y vigencia de permisos; asignación de cupo en orden.
 
 La guía original se conserva en `docs/clase10-original.md`. El BFF mobile del ejemplo no forma parte del Compose de colonia; su código se conserva como referencia en `docs/template-bff-mobile/`.
 

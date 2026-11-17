@@ -39,7 +39,10 @@ app.use(express.json());
 app.use((req, res, next) => {
   res.set('Access-Control-Allow-Origin', CORS_ORIGIN);
   res.set('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
+
   res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key'); // <-- Agregado Idempotency-Key aquí
+
+
   res.set('Access-Control-Expose-Headers', 'Location, WWW-Authenticate');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
@@ -89,6 +92,9 @@ app.use(async (req, res) => {
 
   // Los headers hacia la API se arman de cero: un X-Usuario-* que mande el cliente nunca llega.
   const headers = { 'Content-Type': 'application/json' };
+  if (req.method === 'POST' && req.path === '/inscripciones' && req.get('Idempotency-Key') !== undefined) {
+    headers['Idempotency-Key'] = req.get('Idempotency-Key');
+  }
   if (regla.roles) {
     const { usuario, error } = await autenticar(req);
     // 401: no sé quién sos

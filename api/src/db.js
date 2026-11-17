@@ -8,16 +8,22 @@ for (const key of ['DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASSWORD']) {
 // Las columnas date se devuelven tal cual (YYYY-MM-DD), sin pasar por la zona horaria del proceso.
 pg.types.setTypeParser(pg.types.builtins.DATE, (valor) => valor);
 
-export const pool = new pg.Pool({
-  host: process.env.DB_HOST,
-  port: Number(process.env.DB_PORT),
-  database: process.env.DB_NAME,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  connectionTimeoutMillis: 3000,
-  query_timeout: 3000,
-});
-pool.on('error', (error) => console.error('Error en conexión inactiva a PostgreSQL:', error.message));
+export function crearPool() {
+  const nuevo = new pg.Pool({
+    host: process.env.DB_HOST,
+    port: Number(process.env.DB_PORT),
+    database: process.env.DB_NAME,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    connectionTimeoutMillis: 3000,
+    query_timeout: 3000,
+    max: 10,
+  });
+  nuevo.on('error', (error) => console.error('Error en conexión inactiva a PostgreSQL:', error.message));
+  return nuevo;
+}
+
+export const pool = crearPool();
 
 export async function enTransaccion(trabajo) {
   const client = await pool.connect();

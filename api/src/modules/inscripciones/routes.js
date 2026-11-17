@@ -7,6 +7,7 @@ import { documento, entero, fecha, idDeRuta, texto, validarObjeto } from '../../
 import { asignarTurno } from './asignacion.js';
 import { registrarSalida } from './cola.js';
 import { consultarPadron, motivoFueraDeJurisdiccion } from './padron.js';
+import { conIdempotencia, validarClaveIdempotencia } from './idempotencia.js';
 
 const EDAD_MINIMA = 6;
 const EDAD_MAXIMA = 12;
@@ -58,35 +59,41 @@ async function buscarAccesible(id, usuario, db = pool, { bloquear = false } = {}
 const router = Router();
 
 router.post('/', async (req, res) => {
+  const clave = validarClaveIdempotencia(req.get('Idempotency-Key'));
   const { turnoId, chico } = validarObjeto(
     req.body,
     { turnoId: entero(1), chico: validarChico },
     { requeridos: ['turnoId', 'chico'] },
   );
-  const { rows: turnos } = await pool.query(
-    'SELECT convocatoria_id, inscripcion_abre_en, inscripcion_cierra_en FROM colonia.turnos WHERE id = $1',
-    [turnoId],
-  );
-  const turno = turnos[0];
-  if (!turno) throw noEncontrado(`No existe el turno ${turnoId}.`);
-  const recibidaEn = new Date();
-  if (recibidaEn < turno.inscripcion_abre_en || recibidaEn >= turno.inscripcion_cierra_en) {
-    throw conflicto('El período de inscripción del turno no está abierto.');
-  }
-  validarEdad(chico.fechaNacimiento, fechaEnArgentina(recibidaEn));
   try {
-    const fila = await enTransaccion(async (client) => {
-      const { rows } = await client.query(
-        `INSERT INTO colonia.inscripciones
-           (turno_id, convocatoria_id, tutor_id, documento, nombre, apellido, fecha_nacimiento, creado_en)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-        [turnoId, turno.convocatoria_id, req.usuario.id, chico.documento, chico.nombre, chico.apellido,
-          chico.fechaNacimiento, recibidaEn],
-      );
-      await registrarSalida(client, rows[0].id);
-      return rows[0];
-    });
-    const inscripcion = aInscripcion(fila);
+    const inscripcion = await enTransaccion((client) => conIdempotencia(
+      client, req.usuario.id, clave, { turnoId, chico }, async () => {
+        // Mismo lock que asignación, cancelación y cambios de cupo. Se toma ANTES
+        // de generar el orden: ninguna asignación puede omitir esta admisión en curso.
+        const { rows: turnos } = await client.query(
+          `SELECT convocatoria_id, inscripcion_abre_en, inscripcion_cierra_en
+           FROM colonia.turnos WHERE id = $1 FOR UPDATE`,
+          [turnoId],
+        );
+        const turno = turnos[0];
+        if (!turno) throw noEncontrado(`No existe el turno ${turnoId}.`);
+        // Se evalúa después de esperar el lock; now() devolvería el inicio de la transacción.
+        const { rows: [{ recibida_en: recibidaEn }] } = await client.query('SELECT clock_timestamp() AS recibida_en');
+        if (recibidaEn < turno.inscripcion_abre_en || recibidaEn >= turno.inscripcion_cierra_en) {
+          throw conflicto('El período de inscripción del turno no está abierto.');
+        }
+        validarEdad(chico.fechaNacimiento, fechaEnArgentina(recibidaEn));
+        const { rows } = await client.query(
+          `INSERT INTO colonia.inscripciones
+             (turno_id, convocatoria_id, tutor_id, documento, nombre, apellido, fecha_nacimiento, creado_en)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+          [turnoId, turno.convocatoria_id, req.usuario.id, chico.documento, chico.nombre, chico.apellido,
+            chico.fechaNacimiento, recibidaEn],
+        );
+        await registrarSalida(client, rows[0].id);
+        return aInscripcion(rows[0]);
+      },
+    ));
     res.status(202).location(`inscripciones/${inscripcion.id}`).json(inscripcion);
   } catch (error) {
     if (esInscripcionActivaDuplicada(error)) throw conflicto(DUPLICADA);
@@ -136,6 +143,9 @@ router.patch('/:id', async (req, res) => {
         throw conflicto(`No se puede corregir una inscripción ${actual.estado}.`);
       }
       const cambiaDocumento = chico.documento !== undefined && chico.documento !== actual.documento;
+      if (cambiaDocumento && !pideOtroDocumento) {
+        throw conflicto('El documento cambió durante la corrección. Volvé a intentar.');
+      }
       const nuevo = {
         nombre: chico.nombre ?? actual.nombre,
         apellido: chico.apellido ?? actual.apellido,
@@ -143,15 +153,21 @@ router.patch('/:id', async (req, res) => {
         documento: cambiaDocumento ? chico.documento : actual.documento,
       };
       validarEdad(nuevo.fechaNacimiento, fechaEnArgentina(actual.creado_en));
-      const { rows } = await client.query(
+      let { rows } = await client.query(
         `UPDATE colonia.inscripciones
-         SET nombre = $2, apellido = $3, fecha_nacimiento = $4, documento = $5,
-             es_residente = CASE WHEN $6 THEN true ELSE es_residente END,
-             padron_consultado_en = CASE WHEN $6 THEN clock_timestamp() ELSE padron_consultado_en END
+         SET nombre = $2, apellido = $3, fecha_nacimiento = $4, documento = $5
          WHERE id = $1 RETURNING *`,
-        [id, nuevo.nombre, nuevo.apellido, nuevo.fechaNacimiento, nuevo.documento, cambiaDocumento],
+        [id, nuevo.nombre, nuevo.apellido, nuevo.fechaNacimiento, nuevo.documento],
       );
-      if (cambiaDocumento) await asignarTurno(actual.turno_id, client);
+      if (cambiaDocumento) {
+        // El cambio invalida el resultado anterior y cualquier trabajador en vuelo.
+        // Guardar luego la residencia recién consultada, dentro de la misma transacción.
+        ({ rows } = await client.query(
+          `UPDATE colonia.inscripciones SET es_residente = true, padron_consultado_en = clock_timestamp()
+           WHERE id = $1 RETURNING *`, [id],
+        ));
+        await asignarTurno(actual.turno_id, client);
+      }
       return rows[0];
     });
     res.json(aInscripcion(fila));

@@ -15,7 +15,7 @@ for (const base of bases) {
   assert.equal(page.status, 200, base + ' página');
   const health = await fetch(base + '/api/health', { signal: AbortSignal.timeout(10000) });
   assert.equal(health.status, 200);
-  assert.deepEqual(await health.json(), { status: 'ok', database: 'ok', stage: 'esqueleto' });
+  assert.deepEqual(await health.json(), { status: 'ok', database: 'ok' });
   for (const [method, path, body] of routes) {
     const response = await fetch(base + '/api' + path, {
       method, headers: { 'Content-Type': 'application/json' },
