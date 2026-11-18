@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 
 interface DatosChico {
-  chicoDni: string;
+  documento: string;
   nombre: string;
   apellido: string;
   fechaNacimiento: string;
@@ -29,16 +29,19 @@ type EstadoInscripcion =
 interface Inscripcion {
   id: number;
   turnoId: number;
+  chico: DatosChico;
   estado: EstadoInscripcion;
+  ordenRecepcion: number;
+  creadoEn: string;
   motivoRechazo?: string;
+  motivoCancelacion?: string;
 }
 
 interface SessionEvent extends CustomEvent<{ roles: string[] }> {}
 
 const TOKEN_KEY = "colonia.access_token";
 const TUTOR_KEY = "colonia.is_tutor";
-// Apuntamos directamente al Gateway (puerto 8000) según la arquitectura del TP[cite: 5]
-const GATEWAY_URL = "http://localhost:8000";
+const API_BASE = "/api";
 
 const estilosEstado: Record<EstadoInscripcion, string> = {
   pendiente_de_validacion: "bg-yellow-100 text-yellow-800",
@@ -58,25 +61,47 @@ const etiquetasEstado: Record<EstadoInscripcion, string> = {
 
 async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
-  const token = sessionStorage.getItem(TOKEN_KEY);
+  
+  // Intentar rescatar cualquier token disponible por si acaso
+  const token = sessionStorage.getItem(TOKEN_KEY) || localStorage.getItem(TOKEN_KEY);
+  if (token) {
+    const cleanToken = token.replace(/^"(.*)"$/, '$1');
+    headers.set("Authorization", `Bearer ${cleanToken}`);
+  }
 
-  if (token) headers.set("Authorization", `Bearer ${token}`);
-  if (options.body) headers.set("Content-Type", "application/json");
+  if (options.body && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
 
-  // El Gateway atiende directo en /turnos y /inscripciones (sin el prefijo /api)
-  const response = await fetch(`${GATEWAY_URL}${path}`, { ...options, headers });
+  // Realizamos la petición incluyendo credenciales para que el proxy/gateway reconozca la sesión activa
+  const response = await fetch(`${API_BASE}${path}`, { 
+    ...options, 
+    headers,
+    credentials: 'include' 
+  });
+
   if (!response.ok) {
     const body: unknown = await response.json().catch(() => null);
-    const detail =
-      typeof body === "object" && body !== null && "detail" in body
-        ? String(body.detail)
-        : typeof body === "object" && body !== null && "title" in body
-          ? String(body.title)
-          : `Error ${response.status}: ${response.statusText}`;
-    throw new Error(detail);
+    const problem =
+      typeof body === "object" && body !== null
+        ? (body as { title?: unknown; detail?: unknown })
+        : {};
+    const title = typeof problem.title === "string" ? problem.title : response.statusText;
+    const detail = typeof problem.detail === "string" ? problem.detail : "";
+    throw new Error(mensajeErrorApi(response.status, title, detail));
   }
 
   return response.json() as Promise<T>;
+}
+
+function mensajeErrorApi(status: number, title: string, detail: string): string {
+  const descripcion =
+    status === 401
+      ? "La sesión no es válida o venció. Volvé a ingresar."
+      : status === 403
+        ? "Tu rol no tiene permiso para esta operación."
+        : detail || title;
+  return `${status} ${title}: ${descripcion}`;
 }
 
 function mostrarFecha(fecha: string): string {
@@ -85,18 +110,46 @@ function mostrarFecha(fecha: string): string {
 
 export default function TutorInscripciones() {
   const [esTutor, setEsTutor] = useState(() => sessionStorage.getItem(TUTOR_KEY) === "true");
+  const [esAdmin, setEsAdmin] = useState(() => {
+    // Si guardas el rol de admin o puedes verificarlo en el token/sessionstorage:
+    const token = sessionStorage.getItem(TOKEN_KEY);
+    if (!token) return false;
+    try {
+      // Decodificamos de forma segura el payload del JWT para ver los roles sin librerías externas
+      const base64Url = token.split('.')[1];
+      const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+      const jsonPayload = decodeURIComponent(
+        atob(base64)
+          .split('')
+          .map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
+          .join('')
+      );
+      const payload = JSON.parse(jsonPayload);
+      const roles = payload?.realm_access?.roles || [];
+      return roles.includes("administrador");
+    } catch {
+      return false;
+    }
+  });
   const [turnos, setTurnos] = useState<Turno[]>([]);
+  const [inscripciones, setInscripciones] = useState<Inscripcion[]>([]);
   const [turnoSeleccionado, setTurnoSeleccionado] = useState<Turno | null>(null);
   const [inscripcion, setInscripcion] = useState<Inscripcion | null>(null);
   const [chico, setChico] = useState<DatosChico>({
-    chicoDni: "",
+    documento: "",
     nombre: "",
     apellido: "",
     fechaNacimiento: "",
   });
   const [cargandoTurnos, setCargandoTurnos] = useState(false);
+  const [cargandoInscripciones, setCargandoInscripciones] = useState(false);
   const [enviando, setEnviando] = useState(false);
   const [actualizando, setActualizando] = useState(false);
+  const [editandoId, setEditandoId] = useState<number | null>(null);
+  const [edicion, setEdicion] = useState<DatosChico | null>(null);
+  const [cancelandoId, setCancelandoId] = useState<number | null>(null);
+  const [motivoCancelacion, setMotivoCancelacion] = useState("");
+  const [procesandoId, setProcesandoId] = useState<number | null>(null);
   const [error, setError] = useState("");
   const solicitudPendiente = useRef<{ payload: string; key: string } | null>(null);
 
@@ -104,11 +157,34 @@ export default function TutorInscripciones() {
     const actualizarSesion = (event: Event) => {
       const { roles } = (event as SessionEvent).detail;
       setEsTutor(roles.includes("tutor"));
+      setEsAdmin(roles.includes("administrador"));
     };
 
     document.addEventListener("colonia:session", actualizarSesion);
     return () => document.removeEventListener("colonia:session", actualizarSesion);
   }, []);
+
+  useEffect(() => {
+    if (!esTutor && !esAdmin) {
+      setInscripciones([]);
+      return;
+    }
+
+    const controller = new AbortController();
+    setCargandoInscripciones(true);
+    setError("");
+
+    apiFetch<Inscripcion[]>("/inscripciones", { signal: controller.signal })
+      .then(setInscripciones)
+      .catch((err: Error) => {
+        if (err.name !== "AbortError") setError(err.message);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setCargandoInscripciones(false);
+      });
+
+    return () => controller.abort();
+  }, [esTutor, esAdmin]);
 
   useEffect(() => {
     if (!esTutor) {
@@ -143,7 +219,16 @@ export default function TutorInscripciones() {
     return () => controller.abort();
   }, [esTutor]);
 
-  if (!esTutor) return null;
+  if (!esTutor && !esAdmin) return null;
+
+  async function recargarInscripciones() {
+    setCargandoInscripciones(true);
+    try {
+      setInscripciones(await apiFetch<Inscripcion[]>("/inscripciones"));
+    } finally {
+      setCargandoInscripciones(false);
+    }
+  }
 
   async function enviarInscripcion(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -160,7 +245,7 @@ export default function TutorInscripciones() {
       const body = JSON.stringify({
         turnoId: turnoSeleccionado.id,
         chico: {
-          documento: chico.chicoDni,
+          documento: chico.documento,
           nombre: chico.nombre,
           apellido: chico.apellido,
           fechaNacimiento: chico.fechaNacimiento,
@@ -179,6 +264,7 @@ export default function TutorInscripciones() {
 
       solicitudPendiente.current = null;
       setInscripcion(creada);
+      setInscripciones((actuales) => [...actuales, creada]);
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo enviar la inscripción.");
     } finally {
@@ -200,18 +286,111 @@ export default function TutorInscripciones() {
     }
   }
 
+  async function guardarCorreccion(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (editandoId === null || !edicion) return;
+    setError("");
+    setProcesandoId(editandoId);
+
+    try {
+      await apiFetch<Inscripcion>(`/inscripciones/${editandoId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ chico: edicion }),
+      });
+      setEditandoId(null);
+      setEdicion(null);
+      await recargarInscripciones();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No se pudo corregir la inscripción.");
+    } finally {
+      setProcesandoId(null);
+    }
+  }
+
+  async function cancelarInscripcion(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (cancelandoId === null) return;
+    setError("");
+    setProcesandoId(cancelandoId);
+
+    try {
+      await apiFetch<Inscripcion>(`/inscripciones/${cancelandoId}/cancelaciones`, {
+        method: "POST",
+        body: JSON.stringify({ motivo: motivoCancelacion.trim() }),
+      });
+      setCancelandoId(null);
+      setMotivoCancelacion("");
+      await recargarInscripciones();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No se pudo cancelar la inscripción.");
+    } finally {
+      setProcesandoId(null);
+    }
+  }
+
   function actualizarCampo(campo: keyof DatosChico, valor: string) {
     setChico((actual) => ({ ...actual, [campo]: valor }));
+  }
+
+  function campoChico(
+    datos: DatosChico,
+    actualizar: (campo: keyof DatosChico, valor: string) => void,
+  ) {
+    return (
+      <>
+        <label className="text-sm font-medium text-gray-700">
+          DNI
+          <input
+            required
+            minLength={7}
+            maxLength={8}
+            pattern="[0-9]{7,8}"
+            inputMode="numeric"
+            value={datos.documento}
+            onChange={(event) => actualizar("documento", event.target.value)}
+            className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100"
+          />
+        </label>
+        <label className="text-sm font-medium text-gray-700">
+          Nombre
+          <input
+            required
+            value={datos.nombre}
+            onChange={(event) => actualizar("nombre", event.target.value)}
+            className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100"
+          />
+        </label>
+        <label className="text-sm font-medium text-gray-700">
+          Apellido
+          <input
+            required
+            value={datos.apellido}
+            onChange={(event) => actualizar("apellido", event.target.value)}
+            className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100"
+          />
+        </label>
+        <label className="text-sm font-medium text-gray-700">
+          Fecha de nacimiento
+          <input
+            required
+            type="date"
+            value={datos.fechaNacimiento.slice(0, 10)}
+            onChange={(event) => actualizar("fechaNacimiento", event.target.value)}
+            className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100"
+          />
+        </label>
+      </>
+    );
   }
 
   return (
     <main className="mx-auto mt-10 w-full max-w-5xl rounded-2xl border border-gray-200 bg-white p-6 shadow-sm sm:p-8">
       <header className="mb-8">
         <p className="text-sm font-semibold uppercase tracking-wide text-emerald-700">
-          Espacio del tutor
+          {esAdmin ? "Administración de inscripciones" : "Espacio del tutor"}
         </p>
-        <h1 className="mt-2 text-3xl font-bold text-gray-900">Inscripción de chicos</h1>
-        <p className="mt-2 text-gray-600">Elegí un turno con inscripción abierta.</p>
+        <h1 className="mt-2 text-3xl font-bold text-gray-900">Inscripciones</h1>
+        {esTutor && <p className="mt-2 text-gray-600">Elegí un turno con inscripción abierta.</p>}
       </header>
 
       {error && (
@@ -220,6 +399,146 @@ export default function TutorInscripciones() {
         </div>
       )}
 
+      <section aria-labelledby="inscripciones-titulo" className="mb-10">
+        <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h2 id="inscripciones-titulo" className="text-xl font-semibold text-gray-900">
+              {esAdmin ? "Todas las inscripciones" : "Mis inscripciones"}
+            </h2>
+            <p className="mt-1 text-sm text-gray-600">
+              {esAdmin
+                ? "Podés corregir datos de solicitudes pendientes o cancelar inscripciones activas."
+                : "Estado y datos de tus solicitudes."}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setError("");
+              recargarInscripciones().catch((err: Error) => setError(err.message));
+            }}
+            disabled={cargandoInscripciones}
+            className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+          >
+            {cargandoInscripciones ? "Actualizando..." : "Actualizar lista"}
+          </button>
+        </div>
+
+        {cargandoInscripciones ? (
+          <p role="status" className="text-gray-600">Cargando inscripciones...</p>
+        ) : inscripciones.length === 0 ? (
+          <p className="rounded-lg border border-gray-200 bg-gray-50 p-5 text-gray-600">
+            No hay inscripciones para mostrar.
+          </p>
+        ) : (
+          <div className="overflow-x-auto rounded-xl border border-gray-200">
+            <table className="min-w-full divide-y divide-gray-200 text-left text-sm">
+              <thead className="bg-gray-50 text-xs uppercase tracking-wide text-gray-600">
+                <tr>
+                  <th scope="col" className="px-4 py-3">ID</th>
+                  <th scope="col" className="px-4 py-3">Turno ID</th>
+                  <th scope="col" className="px-4 py-3">Chico/a</th>
+                  <th scope="col" className="px-4 py-3">DNI</th>
+                  <th scope="col" className="px-4 py-3">Nacimiento</th>
+                  <th scope="col" className="px-4 py-3">Estado</th>
+                  {esAdmin && <th scope="col" className="px-4 py-3">Acciones</th>}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-200 bg-white">
+                {inscripciones.map((item) => (
+                  <tr key={item.id} className="align-top">
+                    <td className="whitespace-nowrap px-4 py-4 font-medium text-gray-900">#{item.id}</td>
+                    <td className="whitespace-nowrap px-4 py-4 text-gray-700">#{item.turnoId}</td>
+                    <td className="px-4 py-4 text-gray-700">{item.chico.nombre} {item.chico.apellido}</td>
+                    <td className="whitespace-nowrap px-4 py-4 text-gray-700">{item.chico.documento}</td>
+                    <td className="whitespace-nowrap px-4 py-4 text-gray-700">
+                      {mostrarFecha(item.chico.fechaNacimiento)}
+                    </td>
+                    <td className="px-4 py-4">
+                      <span className={`inline-flex whitespace-nowrap rounded-full px-3 py-1 text-xs font-semibold ${estilosEstado[item.estado]}`}>
+                        {etiquetasEstado[item.estado]}
+                      </span>
+                      {item.motivoRechazo && <p className="mt-2 max-w-xs text-xs text-red-700">{item.motivoRechazo}</p>}
+                      {item.motivoCancelacion && <p className="mt-2 max-w-xs text-xs text-gray-600">{item.motivoCancelacion}</p>}
+                    </td>
+                    {esAdmin && (
+                      <td className="min-w-64 px-4 py-4">
+                        {item.estado === "pendiente_de_validacion" && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditandoId(item.id);
+                              setEdicion({ ...item.chico });
+                              setCancelandoId(null);
+                            }}
+                            className="mr-2 rounded-lg border border-gray-300 px-3 py-1.5 font-semibold text-gray-700 hover:bg-gray-50"
+                          >
+                            Corregir
+                          </button>
+                        )}
+                        {item.estado !== "cancelada" && item.estado !== "rechazada" && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCancelandoId(item.id);
+                              setMotivoCancelacion("");
+                              setEditandoId(null);
+                            }}
+                            className="rounded-lg border border-red-200 px-3 py-1.5 font-semibold text-red-700 hover:bg-red-50"
+                          >
+                            Cancelar inscripción
+                          </button>
+                        )}
+                        {editandoId === item.id && edicion && (
+                          <form onSubmit={guardarCorreccion} className="mt-4 grid min-w-72 gap-3 rounded-lg bg-gray-50 p-3">
+                            <h3 className="font-semibold text-gray-900">Corregir chico/a #{item.id}</h3>
+                            {campoChico(edicion, (campo, valor) =>
+                              setEdicion((actual) => actual ? { ...actual, [campo]: valor } : actual),
+                            )}
+                            <div className="flex gap-2">
+                              <button type="submit" disabled={procesandoId === item.id} className="rounded-lg bg-emerald-700 px-3 py-2 font-semibold text-white hover:bg-emerald-800 disabled:opacity-60">
+                                {procesandoId === item.id ? "Guardando..." : "Guardar"}
+                              </button>
+                              <button type="button" onClick={() => { setEditandoId(null); setEdicion(null); }} className="rounded-lg border border-gray-300 px-3 py-2 font-semibold text-gray-700">
+                                Cerrar
+                              </button>
+                            </div>
+                          </form>
+                        )}
+                        {cancelandoId === item.id && (
+                          <form onSubmit={cancelarInscripcion} className="mt-4 min-w-72 rounded-lg bg-gray-50 p-3">
+                            <label className="block text-sm font-medium text-gray-700">
+                              Motivo obligatorio
+                              <textarea
+                                required
+                                minLength={1}
+                                value={motivoCancelacion}
+                                onChange={(event) => setMotivoCancelacion(event.target.value)}
+                                className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2"
+                                rows={3}
+                              />
+                            </label>
+                            <div className="mt-3 flex gap-2">
+                              <button type="submit" disabled={procesandoId === item.id || !motivoCancelacion.trim()} className="rounded-lg bg-red-700 px-3 py-2 font-semibold text-white hover:bg-red-800 disabled:opacity-60">
+                                {procesandoId === item.id ? "Cancelando..." : "Confirmar baja"}
+                              </button>
+                              <button type="button" onClick={() => setCancelandoId(null)} className="rounded-lg border border-gray-300 px-3 py-2 font-semibold text-gray-700">
+                                Cerrar
+                              </button>
+                            </div>
+                          </form>
+                        )}
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {esTutor && <section aria-label="Solicitar una inscripción">
       {cargandoTurnos ? (
         <p role="status" className="text-gray-600">Cargando turnos...</p>
       ) : turnos.length === 0 ? (
@@ -275,50 +594,7 @@ export default function TutorInscripciones() {
           </h2>
 
           <form onSubmit={enviarInscripcion} className="mt-5 grid gap-4 sm:grid-cols-2">
-            <label className="text-sm font-medium text-gray-700">
-              DNI
-              <input
-                required
-                minLength={7}
-                maxLength={8}
-                pattern="[0-9]{7,8}"
-                inputMode="numeric"
-                value={chico.chicoDni}
-                onChange={(event) => actualizarCampo("chicoDni", event.target.value)}
-                className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100"
-              />
-            </label>
-
-            <label className="text-sm font-medium text-gray-700">
-              Nombre
-              <input
-                required
-                value={chico.nombre}
-                onChange={(event) => actualizarCampo("nombre", event.target.value)}
-                className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100"
-              />
-            </label>
-
-            <label className="text-sm font-medium text-gray-700">
-              Apellido
-              <input
-                required
-                value={chico.apellido}
-                onChange={(event) => actualizarCampo("apellido", event.target.value)}
-                className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100"
-              />
-            </label>
-
-            <label className="text-sm font-medium text-gray-700">
-              Fecha de nacimiento
-              <input
-                required
-                type="date"
-                value={chico.fechaNacimiento}
-                onChange={(event) => actualizarCampo("fechaNacimiento", event.target.value)}
-                className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100"
-              />
-            </label>
+            {campoChico(chico, actualizarCampo)}
 
             <div className="flex flex-wrap gap-3 sm:col-span-2">
               <button
@@ -369,6 +645,7 @@ export default function TutorInscripciones() {
           )}
         </section>
       )}
+      </section>}
     </main>
   );
 }
