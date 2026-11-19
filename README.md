@@ -2,6 +2,8 @@
 
 Arquitectura de Software 1 · UNAHUR · Escenario 6B
 
+La documentación de decisiones de arquitectura está en el [índice de ADR](docs/README.md), con un archivo Markdown por decisión.
+
 ## Alcance de este avance
 
 Login delegado en Keycloak con los dos roles del escenario 6B, API de turnos e inscripciones sobre PostgreSQL, y validación de residencia por cola.

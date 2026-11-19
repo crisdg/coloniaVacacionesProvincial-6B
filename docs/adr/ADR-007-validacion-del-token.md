@@ -1,7 +1,8 @@
 # ADR-007: Dónde y qué se valida del token
 
 * **Estado:** Aceptado
-* **Complementa:** ADR-003 del escenario 6B (autenticación delegada en OIDC y autorización RBAC). No reemplaza al ADR-001 (monolito modular) ni al ADR-006 (secretos fuera del Compose).
+* **Complementa:** [ADR-003](ADR-003-autenticacion-oidc-rbac.md) (autenticación delegada en OIDC y autorización RBAC). No reemplaza al [ADR-001](ADR-001-monolito-modular.md) (monolito modular).
+* **Fuente:** Corresponde al ADR-006 del documento del escenario 6B. Se conserva el identificador ADR-007 ya utilizado en el repositorio; ver la [correspondencia de numeración](../README.md#correspondencia-de-numeración).
 
 ## Contexto
 
@@ -35,3 +36,14 @@ Los permisos están en el gateway, asignados al rol y no a la persona: tutor con
 * **Ganancia:** Una sola puerta aplica firma, emisor, audiencia, vencimiento y rol. Swagger y el frontend llegan a la API solo a través del gateway.
 * **Resignación:** Quien esté dentro de la red de Compose puede llamar a la API sin token. El puerto de la API no se publica en el host.
 * **Identidad hacia la API:** el gateway arma de cero los headers del pedido reenviado y agrega `X-Usuario-Id` (el `sub` del token) y `X-Usuario-Roles`. Un `X-Usuario-*` que mande el cliente nunca llega a la API. La API usa esos headers para la titularidad, porque el gateway distingue roles pero no dueños: un tutor solo ve sus inscripciones.
+
+## Atributos de calidad
+
+Favorece la mantenibilidad al concentrar la política de validación del token y los permisos por operación. La seguridad depende de restringir el acceso a la red interna y de que los clientes públicos ingresen por el gateway. La API confía en los headers recibidos; no hay autenticación adicional de esas llamadas internas.
+
+## Implementación y referencias
+
+* [Gateway](../../auth/gateway/src/index.js): validación JWT, reglas RBAC y reconstrucción de headers.
+* [Anexo de autenticación](../../docker-compose.auth.yml): frontend y Swagger apuntan al gateway, y la API no publica puertos. Esta decisión presupone iniciar el entorno con ambos archivos Compose, como indica el [README del proyecto](../../README.md#levantar-el-proyecto).
+* [Identidad en la API](../../api/src/shared/identidad.js) y [rutas de inscripciones](../../api/src/modules/inscripciones/routes.js): uso de identidad y control de titularidad.
+* [Pruebas del gateway](../../auth/gateway/test/e2e.test.mjs) y [pruebas de API](../../api/test/api.test.mjs).
