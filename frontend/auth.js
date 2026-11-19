@@ -3,6 +3,7 @@ const CLIENT_ID = 'frontend';
 const REDIRECT_URI = 'http://localhost:3001/';
 const TOKEN_KEY = 'colonia.access_token';
 const ID_TOKEN_KEY = 'colonia.id_token';
+const API_BASE = '/api';
 
 const $ = (id) => document.querySelector(id);
 
@@ -118,7 +119,7 @@ async function mostrarSesion() {
   if (ingresarBtn) ingresarBtn.hidden = true;
   if (salirBtn) salirBtn.hidden = false;
 
-  const response = await fetch('http://localhost:8000/yo', { headers: { Authorization: `Bearer ${token()}` } });
+  const response = await fetch(`${API_BASE}/yo`, { headers: { Authorization: `Bearer ${token()}` } });
   if (response.status === 401) {
     sessionStorage.removeItem(TOKEN_KEY);
     informarSesion();
