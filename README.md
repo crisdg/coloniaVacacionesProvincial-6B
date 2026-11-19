@@ -90,21 +90,15 @@ Reemplazar los textos `REEMPLAZAR_...` antes de continuar. `.env` está excluido
 
 Las variables `POSTGRES_*` configuran la base, `RABBITMQ_*` el broker y `KC_ADMIN_*` la cuenta de administración de Keycloak. Esta última es distinta de los usuarios de la aplicación.
 
-### 3. Validar y construir
+### 3. Construir y levantar
 
-Validar la configuración sin imprimir los valores de las contraseñas:
-
-```powershell
-docker compose -f docker-compose.yml -f docker-compose.auth.yml config --quiet
-```
-
-Si termina sin errores, construir y levantar todos los servicios:
+Con el `.env` completo, desde la raíz del repositorio:
 
 ```powershell
-docker compose -f docker-compose.yml -f docker-compose.auth.yml up -d --build --wait --wait-timeout 180
+docker compose -f docker-compose.yml -f docker-compose.auth.yml up -d --build
 ```
 
-La primera ejecución descarga imágenes e instala dependencias dentro de los contenedores. No requiere ejecutar `npm install` en el host. En equipos lentos, si vence la espera, revisar los logs y volver a comprobar el estado; el timeout no elimina los contenedores.
+La primera ejecución descarga imágenes e instala dependencias dentro de los contenedores. No requiere ejecutar `npm install` en el host.
 
 Durante el primer arranque se crean los volúmenes, se aplican las migraciones pendientes y se importa el realm `colonia` en Keycloak. Las migraciones cargan la convocatoria `verano-2027` y tres sedes: Polideportivo Central (1), Parque Municipal (2) y Club Social Norte (3). **No se crean turnos ni inscripciones de ejemplo**; el primer turno se crea en el recorrido de prueba de esta guía.
 
@@ -243,7 +237,7 @@ docker compose -f docker-compose.yml -f docker-compose.auth.yml down
 Volver a levantar el entorno o reconstruir después de cambios en el código:
 
 ```powershell
-docker compose -f docker-compose.yml -f docker-compose.auth.yml up -d --build --wait --wait-timeout 180
+docker compose -f docker-compose.yml -f docker-compose.auth.yml up -d --build
 ```
 
 Las imágenes copian el código al construir: guardar un archivo local no actualiza automáticamente los contenedores. Las migraciones nuevas se aplican al arrancar la API; las ya registradas no se repiten.
@@ -256,7 +250,7 @@ Los datos persisten en los volúmenes de PostgreSQL, RabbitMQ y Keycloak del pro
 
 ```powershell
 docker compose -f docker-compose.yml -f docker-compose.auth.yml down --volumes
-docker compose -f docker-compose.yml -f docker-compose.auth.yml up -d --build --wait --wait-timeout 180
+docker compose -f docker-compose.yml -f docker-compose.auth.yml up -d --build
 ```
 
 El archivo `.env` se conserva. Se vuelven a aplicar las migraciones y a importar los usuarios del realm; habrá que crear nuevamente los turnos.
@@ -279,7 +273,7 @@ docker compose -f docker-compose.yml -f docker-compose.auth.yml logs -f api
 `Ctrl+C` termina el seguimiento de logs sin detener los contenedores.
 
 - **No se puede conectar al motor de Docker:** comprobar que Docker Desktop esté iniciado, use contenedores Linux y que `docker info` funcione en esa terminal.
-- **Error de variable obligatoria:** verificar que exista `.env` en la raíz y que las tres contraseñas estén completas. Repetir `config --quiet`.
+- **Error de variable obligatoria:** verificar que exista `.env` en la raíz y que las tres contraseñas estén completas. Volver a ejecutar el comando de arranque.
 - **Error con `!reset`:** actualizar Docker Compose a una versión compatible y usar `docker compose`, sin el guion del comando antiguo `docker-compose`.
 - **Puerto ocupado:** detener la aplicación que ocupa 3001, 8000, 8080 o 8180. Cambiar puertos requiere ajustar también redirecciones, orígenes y URLs OIDC; la guía utiliza los predeterminados.
 - **`502` o servicios no saludables:** revisar los logs y esperar la inicialización. Confirmar que se usaron ambos archivos Compose.
