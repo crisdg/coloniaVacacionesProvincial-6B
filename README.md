@@ -227,6 +227,25 @@ node scripts/smoke.mjs
 
 Para puertos diferentes: `node scripts/smoke.mjs http://localhost:3001 http://localhost:8080`, reemplazando las URLs.
 
+La fitness function de arquitectura recorre los imports relativos de `api/src`, `auth/gateway/src` y el código fuente del frontend. Falla ante ciclos, dependencias desde `api/src/shared` hacia `api/src/modules` o imports del frontend hacia fuentes internas del API. No prohíbe el acceso a DB desde las rutas:
+
+```powershell
+node --test scripts/architecture.test.mjs
+```
+
+La suite HTTP E6 envía requests al gateway real y requiere el stack levantado con los dos archivos Compose. Usa tokens de tres usuarios del realm: un administrador y dos tutores distintos. El realm inicial trae un solo tutor (`beto`); para titularidad, creá un segundo usuario con rol `tutor` desde la consola de Keycloak (`http://localhost:8180/admin/`). No hace falta habilitar password grant: iniciá sesión con cada usuario desde el frontend y copiá el access token en la consola del navegador con `sessionStorage.getItem('colonia.access_token')`.
+
+En PowerShell, cargá los tokens solo en la sesión actual (no los agregues al repositorio) y corré:
+
+```powershell
+$env:E6_ADMIN_TOKEN = '<access token de ana>'
+$env:E6_TUTOR_A_TOKEN = '<access token de beto>'
+$env:E6_TUTOR_B_TOKEN = '<access token del segundo tutor>'
+node --test auth/gateway/test/e2e.test.mjs
+```
+
+`E6_GATEWAY_URL` permite cambiar el destino y por defecto es `http://localhost:8000`. La prueba crea un turno y una inscripción con datos únicos que quedan persistidos en la base; verifica 401 sin/con token inválido, 403 al crear un turno como tutor, 404 al acceder a la inscripción del otro tutor y que headers `X-Usuario-*` falsificados no cambian la identidad extraída del token.
+
 Las pruebas de contrato de la API corren dentro de la red de Compose, con la identidad que pondría el gateway:
 
 ```powershell
