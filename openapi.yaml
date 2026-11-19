@@ -62,7 +62,7 @@ paths:
         - "Turnos"
       operationId: "crearTurno"
       summary: "Crear un turno"
-      description: "Rol: administrador. La convocatoria y la sede deben existir en el catálogo precargado; si no, 400."
+      description: "Rol: administrador. La convocatoria y la sede deben existir en el catálogo precargado; si no, 400. El ejemplo deja el período abierto desde el 1/11/2026 hasta el 3/1/2027."
       requestBody:
         required: true
         content:
@@ -383,12 +383,12 @@ components:
           type: "string"
           format: "date-time"
           description: "Fecha y hora con zona horaria explícita."
-          example: "2026-12-01T09:00:00-03:00"
+          example: "2026-11-01T09:00:00-03:00"
         inscripcionCierraEn:
           type: "string"
           format: "date-time"
           description: "Fecha y hora con zona horaria explícita."
-          example: "2026-12-20T18:00:00-03:00"
+          example: "2027-01-03T18:00:00-03:00"
         cupoTotal:
           type: "integer"
           minimum: 0
@@ -415,12 +415,12 @@ components:
           type: "string"
           format: "date-time"
           description: "Fecha y hora con zona horaria explícita."
-          example: "2026-12-01T09:00:00-03:00"
+          example: "2026-11-01T09:00:00-03:00"
         inscripcionCierraEn:
           type: "string"
           format: "date-time"
           description: "Fecha y hora con zona horaria explícita."
-          example: "2026-12-20T18:00:00-03:00"
+          example: "2027-01-03T18:00:00-03:00"
         cupoTotal:
           type: "integer"
           minimum: 0
@@ -471,12 +471,12 @@ components:
           type: "string"
           format: "date-time"
           description: "Fecha y hora con zona horaria explícita."
-          example: "2026-12-01T09:00:00-03:00"
+          example: "2026-11-01T09:00:00-03:00"
         inscripcionCierraEn:
           type: "string"
           format: "date-time"
           description: "Fecha y hora con zona horaria explícita."
-          example: "2026-12-20T18:00:00-03:00"
+          example: "2027-01-03T18:00:00-03:00"
         cupoTotal:
           type: "integer"
           minimum: 0
