@@ -144,6 +144,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     ingresar().catch(() => mostrarError('No se pudo iniciar sesión. Intentá nuevamente.'));
   });
   $('#salir').addEventListener('click', salir);
+  document.addEventListener('colonia:unauthorized', async () => {
+    sessionStorage.removeItem(TOKEN_KEY);
+    sessionStorage.removeItem(ID_TOKEN_KEY);
+    localStorage.removeItem(TOKEN_KEY);
+    await mostrarSesion();
+  });
 
   try {
     await completarLogin();

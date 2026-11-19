@@ -21,7 +21,7 @@ interface Turno {
 
 interface NuevoTurno {
   convocatoriaId: string;
-  sedeId: string;
+  sedeId: number;
   nombre: string;
   fechaInicio: string;
   fechaFin: string;
@@ -54,8 +54,8 @@ const TOKEN_KEY = "colonia.access_token";
 const TUTOR_KEY = "colonia.is_tutor";
 const API_BASE = "/api";
 const nuevoTurnoInicial: NuevoTurno = {
-  convocatoriaId: "",
-  sedeId: "",
+  convocatoriaId: "verano-2027",
+  sedeId: 1,
   nombre: "",
   fechaInicio: "",
   fechaFin: "",
@@ -100,6 +100,10 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
     headers,
     credentials: 'include' 
   });
+
+  if (response.status === 401) {
+    document.dispatchEvent(new CustomEvent("colonia:unauthorized"));
+  }
 
   if (!response.ok) {
     const body: unknown = await response.json().catch(() => null);
@@ -273,7 +277,7 @@ export default function TutorInscripciones() {
         method: "POST",
         body: JSON.stringify({
           convocatoriaId: nuevoTurno.convocatoriaId.trim(),
-          sedeId: Number(nuevoTurno.sedeId),
+          sedeId: nuevoTurno.sedeId,
           nombre: nuevoTurno.nombre.trim(),
           fechaInicio: nuevoTurno.fechaInicio,
           fechaFin: nuevoTurno.fechaFin,
@@ -332,6 +336,10 @@ export default function TutorInscripciones() {
       solicitudPendiente.current = null;
       setInscripcion(creada);
       setInscripciones((actuales) => [...actuales, creada]);
+      const recargas = await Promise.allSettled([recargarInscripciones(), recargarTurnos()]);
+      if (recargas.some((resultado) => resultado.status === "rejected")) {
+        setError("La inscripción se envió, pero no se pudo actualizar toda la información.");
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo enviar la inscripción.");
     } finally {
@@ -387,7 +395,10 @@ export default function TutorInscripciones() {
       });
       setCancelandoId(null);
       setMotivoCancelacion("");
-      await recargarInscripciones();
+      const recargas = await Promise.allSettled([recargarInscripciones(), recargarTurnos()]);
+      if (recargas.some((resultado) => resultado.status === "rejected")) {
+        setError("La inscripción se canceló, pero no se pudo actualizar toda la información.");
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo cancelar la inscripción.");
     } finally {
@@ -509,25 +520,27 @@ export default function TutorInscripciones() {
               </label>
               <label className="text-sm font-medium text-gray-700">
                 ID de convocatoria
-                <input
+                <select
                   required
                   value={nuevoTurno.convocatoriaId}
                   onChange={(event) => setNuevoTurno({ ...nuevoTurno, convocatoriaId: event.target.value })}
-                  placeholder="Ej.: verano-2027"
                   className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100"
-                />
+                >
+                  <option value="verano-2027">Colonia de verano 2027 (verano-2027)</option>
+                </select>
               </label>
               <label className="text-sm font-medium text-gray-700">
                 ID de sede
-                <input
+                <select
                   required
-                  type="number"
-                  min="1"
-                  step="1"
                   value={nuevoTurno.sedeId}
-                  onChange={(event) => setNuevoTurno({ ...nuevoTurno, sedeId: event.target.value })}
+                  onChange={(event) => setNuevoTurno({ ...nuevoTurno, sedeId: Number(event.target.value) })}
                   className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100"
-                />
+                >
+                  <option value={1}>1 - Polideportivo Central (Hurlingham)</option>
+                  <option value={2}>2 - Parque Municipal (Morón)</option>
+                  <option value={3}>3 - Club Social Norte (Ituzaingó)</option>
+                </select>
               </label>
               <label className="text-sm font-medium text-gray-700">
                 Fecha de inicio
