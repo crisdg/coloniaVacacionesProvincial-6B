@@ -19,6 +19,17 @@ interface Turno {
   disponibles: number;
 }
 
+interface NuevoTurno {
+  convocatoriaId: string;
+  sedeId: string;
+  nombre: string;
+  fechaInicio: string;
+  fechaFin: string;
+  inscripcionAbreEn: string;
+  inscripcionCierraEn: string;
+  cupoTotal: string;
+}
+
 type EstadoInscripcion =
   | "pendiente_de_validacion"
   | "confirmada"
@@ -42,6 +53,16 @@ interface SessionEvent extends CustomEvent<{ roles: string[] }> {}
 const TOKEN_KEY = "colonia.access_token";
 const TUTOR_KEY = "colonia.is_tutor";
 const API_BASE = "/api";
+const nuevoTurnoInicial: NuevoTurno = {
+  convocatoriaId: "",
+  sedeId: "",
+  nombre: "",
+  fechaInicio: "",
+  fechaFin: "",
+  inscripcionAbreEn: "",
+  inscripcionCierraEn: "",
+  cupoTotal: "",
+};
 
 const estilosEstado: Record<EstadoInscripcion, string> = {
   pendiente_de_validacion: "bg-yellow-100 text-yellow-800",
@@ -86,26 +107,33 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
       typeof body === "object" && body !== null
         ? (body as { title?: unknown; detail?: unknown })
         : {};
-    const title = typeof problem.title === "string" ? problem.title : response.statusText;
     const detail = typeof problem.detail === "string" ? problem.detail : "";
-    throw new Error(mensajeErrorApi(response.status, title, detail));
+    throw new Error(mensajeErrorApi(response.status, detail));
   }
 
   return response.json() as Promise<T>;
 }
 
-function mensajeErrorApi(status: number, title: string, detail: string): string {
-  const descripcion =
-    status === 401
-      ? "La sesión no es válida o venció. Volvé a ingresar."
-      : status === 403
-        ? "Tu rol no tiene permiso para esta operación."
-        : detail || title;
-  return `${status} ${title}: ${descripcion}`;
+function mensajeErrorApi(status: number, detail: string): string {
+  if (status === 401) return "La sesión no es válida o venció. Volvé a ingresar.";
+  if (status === 403) return "No tenés permiso para realizar esta acción.";
+  if (status === 400) return detail || "Revisá los datos ingresados.";
+  if (status >= 500) return "Ocurrió un problema al comunicarse con el sistema. Intentá nuevamente.";
+  return detail || "No se pudo completar la solicitud.";
 }
 
 function mostrarFecha(fecha: string): string {
   return new Date(`${fecha.slice(0, 10)}T12:00:00`).toLocaleDateString("es-AR");
+}
+
+function turnosVisibles(turnos: Turno[], esAdmin: boolean): Turno[] {
+  if (esAdmin) return turnos;
+  const ahora = Date.now();
+  return turnos.filter(
+    (turno) =>
+      new Date(turno.inscripcionAbreEn).getTime() <= ahora &&
+      ahora < new Date(turno.inscripcionCierraEn).getTime(),
+  );
 }
 
 export default function TutorInscripciones() {
@@ -132,6 +160,9 @@ export default function TutorInscripciones() {
     }
   });
   const [turnos, setTurnos] = useState<Turno[]>([]);
+  const [nuevoTurno, setNuevoTurno] = useState<NuevoTurno>(nuevoTurnoInicial);
+  const [creandoTurno, setCreandoTurno] = useState(false);
+  const [turnoCreado, setTurnoCreado] = useState("");
   const [inscripciones, setInscripciones] = useState<Inscripcion[]>([]);
   const [turnoSeleccionado, setTurnoSeleccionado] = useState<Turno | null>(null);
   const [inscripcion, setInscripcion] = useState<Inscripcion | null>(null);
@@ -187,7 +218,7 @@ export default function TutorInscripciones() {
   }, [esTutor, esAdmin]);
 
   useEffect(() => {
-    if (!esTutor) {
+    if (!esTutor && !esAdmin) {
       setTurnos([]);
       setTurnoSeleccionado(null);
       setInscripcion(null);
@@ -199,16 +230,7 @@ export default function TutorInscripciones() {
     setError("");
 
     apiFetch<Turno[]>("/turnos", { signal: controller.signal })
-      .then((resultado) => {
-        const ahora = Date.now();
-        setTurnos(
-          resultado.filter(
-            (turno) =>
-              new Date(turno.inscripcionAbreEn).getTime() <= ahora &&
-              ahora < new Date(turno.inscripcionCierraEn).getTime(),
-          ),
-        );
-      })
+      .then((resultado) => setTurnos(turnosVisibles(resultado, esAdmin)))
       .catch((err: Error) => {
         if (err.name !== "AbortError") setError(err.message);
       })
@@ -217,7 +239,7 @@ export default function TutorInscripciones() {
       });
 
     return () => controller.abort();
-  }, [esTutor]);
+  }, [esTutor, esAdmin]);
 
   if (!esTutor && !esAdmin) return null;
 
@@ -227,6 +249,51 @@ export default function TutorInscripciones() {
       setInscripciones(await apiFetch<Inscripcion[]>("/inscripciones"));
     } finally {
       setCargandoInscripciones(false);
+    }
+  }
+
+  async function recargarTurnos() {
+    setCargandoTurnos(true);
+    try {
+      const resultado = await apiFetch<Turno[]>("/turnos");
+      setTurnos(turnosVisibles(resultado, esAdmin));
+    } finally {
+      setCargandoTurnos(false);
+    }
+  }
+
+  async function crearTurno(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    setTurnoCreado("");
+    setCreandoTurno(true);
+
+    try {
+      const creado = await apiFetch<Turno>("/turnos", {
+        method: "POST",
+        body: JSON.stringify({
+          convocatoriaId: nuevoTurno.convocatoriaId.trim(),
+          sedeId: Number(nuevoTurno.sedeId),
+          nombre: nuevoTurno.nombre.trim(),
+          fechaInicio: nuevoTurno.fechaInicio,
+          fechaFin: nuevoTurno.fechaFin,
+          inscripcionAbreEn: new Date(nuevoTurno.inscripcionAbreEn).toISOString(),
+          inscripcionCierraEn: new Date(nuevoTurno.inscripcionCierraEn).toISOString(),
+          cupoTotal: Number(nuevoTurno.cupoTotal),
+        }),
+      });
+
+      setNuevoTurno(nuevoTurnoInicial);
+      setTurnoCreado(`El turno “${creado.nombre}” se creó correctamente.`);
+      try {
+        await recargarTurnos();
+      } catch {
+        setError("El turno se creó, pero no se pudo actualizar el listado.");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No se pudo crear el turno.");
+    } finally {
+      setCreandoTurno(false);
     }
   }
 
@@ -387,16 +454,198 @@ export default function TutorInscripciones() {
     <main className="mx-auto mt-10 w-full max-w-5xl rounded-2xl border border-gray-200 bg-white p-6 shadow-sm sm:p-8">
       <header className="mb-8">
         <p className="text-sm font-semibold uppercase tracking-wide text-emerald-700">
-          {esAdmin ? "Administración de inscripciones" : "Espacio del tutor"}
+          {esAdmin ? "Panel de administración" : "Espacio del tutor"}
         </p>
-        <h1 className="mt-2 text-3xl font-bold text-gray-900">Inscripciones</h1>
-        {esTutor && <p className="mt-2 text-gray-600">Elegí un turno con inscripción abierta.</p>}
+        <h1 className="mt-2 text-3xl font-bold text-gray-900">
+          {esAdmin ? "Gestión de la colonia" : "Inscripciones"}
+        </h1>
+        <p className="mt-2 text-gray-600">
+          {esAdmin
+            ? "Administrá los turnos y acompañá las solicitudes de inscripción."
+            : "Elegí un turno con inscripción abierta."}
+        </p>
       </header>
 
       {error && (
         <div role="alert" className="mb-6 rounded-lg border border-red-200 bg-red-50 p-4 text-red-800">
           {error}
         </div>
+      )}
+
+      {esAdmin && (
+        <section
+          aria-labelledby="turnos-admin-titulo"
+          className="mb-10 rounded-2xl border border-emerald-100 bg-emerald-50/40 p-5 sm:p-7"
+        >
+          <div className="mb-6">
+            <p className="text-sm font-semibold uppercase tracking-wide text-emerald-700">
+              Administración
+            </p>
+            <h2 id="turnos-admin-titulo" className="mt-1 text-2xl font-bold text-gray-900">
+              Turnos
+            </h2>
+            <p className="mt-1 text-sm text-gray-600">
+              Creá nuevos turnos y consultá los que ya están programados.
+            </p>
+          </div>
+
+          {turnoCreado && (
+            <p role="status" className="mb-5 rounded-lg border border-emerald-200 bg-white p-3 text-sm text-emerald-800">
+              {turnoCreado}
+            </p>
+          )}
+
+          <form onSubmit={crearTurno} className="rounded-xl border border-gray-200 bg-white p-5 sm:p-6">
+            <h3 className="text-lg font-semibold text-gray-900">Crear turno</h3>
+            <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <label className="text-sm font-medium text-gray-700">
+                Nombre del turno
+                <input
+                  required
+                  value={nuevoTurno.nombre}
+                  onChange={(event) => setNuevoTurno({ ...nuevoTurno, nombre: event.target.value })}
+                  className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100"
+                />
+              </label>
+              <label className="text-sm font-medium text-gray-700">
+                ID de convocatoria
+                <input
+                  required
+                  value={nuevoTurno.convocatoriaId}
+                  onChange={(event) => setNuevoTurno({ ...nuevoTurno, convocatoriaId: event.target.value })}
+                  placeholder="Ej.: verano-2027"
+                  className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100"
+                />
+              </label>
+              <label className="text-sm font-medium text-gray-700">
+                ID de sede
+                <input
+                  required
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={nuevoTurno.sedeId}
+                  onChange={(event) => setNuevoTurno({ ...nuevoTurno, sedeId: event.target.value })}
+                  className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100"
+                />
+              </label>
+              <label className="text-sm font-medium text-gray-700">
+                Fecha de inicio
+                <input
+                  required
+                  type="date"
+                  value={nuevoTurno.fechaInicio}
+                  onChange={(event) => setNuevoTurno({ ...nuevoTurno, fechaInicio: event.target.value })}
+                  className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100"
+                />
+              </label>
+              <label className="text-sm font-medium text-gray-700">
+                Fecha de fin
+                <input
+                  required
+                  type="date"
+                  min={nuevoTurno.fechaInicio || undefined}
+                  value={nuevoTurno.fechaFin}
+                  onChange={(event) => setNuevoTurno({ ...nuevoTurno, fechaFin: event.target.value })}
+                  className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100"
+                />
+              </label>
+              <label className="text-sm font-medium text-gray-700">
+                Cupo total
+                <input
+                  required
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={nuevoTurno.cupoTotal}
+                  onChange={(event) => setNuevoTurno({ ...nuevoTurno, cupoTotal: event.target.value })}
+                  className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100"
+                />
+              </label>
+              <label className="text-sm font-medium text-gray-700">
+                Apertura de inscripción
+                <input
+                  required
+                  type="datetime-local"
+                  value={nuevoTurno.inscripcionAbreEn}
+                  onChange={(event) => setNuevoTurno({ ...nuevoTurno, inscripcionAbreEn: event.target.value })}
+                  className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100"
+                />
+              </label>
+              <label className="text-sm font-medium text-gray-700">
+                Cierre de inscripción
+                <input
+                  required
+                  type="datetime-local"
+                  value={nuevoTurno.inscripcionCierraEn}
+                  onChange={(event) => setNuevoTurno({ ...nuevoTurno, inscripcionCierraEn: event.target.value })}
+                  className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100"
+                />
+              </label>
+            </div>
+            <button
+              type="submit"
+              disabled={creandoTurno}
+              className="mt-5 rounded-lg bg-emerald-700 px-5 py-2.5 font-semibold text-white transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {creandoTurno ? "Creando turno..." : "Guardar turno"}
+            </button>
+          </form>
+
+          <div className="mt-7">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+              <h3 className="text-lg font-semibold text-gray-900">Turnos programados</h3>
+              <button
+                type="button"
+                onClick={() => recargarTurnos().catch((err: Error) => setError(err.message))}
+                disabled={cargandoTurnos}
+                className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+              >
+                {cargandoTurnos ? "Actualizando..." : "Actualizar turnos"}
+              </button>
+            </div>
+            {cargandoTurnos ? (
+              <p role="status" className="rounded-lg bg-white p-4 text-sm text-gray-600">Cargando turnos...</p>
+            ) : turnos.length === 0 ? (
+              <p className="rounded-lg border border-gray-200 bg-white p-4 text-sm text-gray-600">
+                Todavía no hay turnos programados.
+              </p>
+            ) : (
+              <div className="grid gap-3 md:grid-cols-2">
+                {turnos.map((turno) => (
+                  <article key={turno.id} className="rounded-xl border border-gray-200 bg-white p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <h4 className="font-semibold text-gray-900">{turno.nombre}</h4>
+                        <p className="mt-1 text-sm text-gray-600">
+                          Turno #{turno.id} · Sede {turno.sedeId}
+                        </p>
+                      </div>
+                      <span className="shrink-0 rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-800">
+                        {turno.disponibles} / {turno.cupoTotal} cupos
+                      </span>
+                    </div>
+                    <dl className="mt-4 space-y-2 text-sm text-gray-600">
+                      <div className="flex justify-between gap-3">
+                        <dt>Actividad</dt>
+                        <dd className="text-right font-medium text-gray-900">
+                          {mostrarFecha(turno.fechaInicio)} – {mostrarFecha(turno.fechaFin)}
+                        </dd>
+                      </div>
+                      <div className="flex justify-between gap-3">
+                        <dt>Inscripciones</dt>
+                        <dd className="text-right font-medium text-gray-900">
+                          {new Date(turno.inscripcionAbreEn).toLocaleString("es-AR")} –{" "}
+                          {new Date(turno.inscripcionCierraEn).toLocaleString("es-AR")}
+                        </dd>
+                      </div>
+                    </dl>
+                  </article>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
       )}
 
       <section aria-labelledby="inscripciones-titulo" className="mb-10">
@@ -538,54 +787,59 @@ export default function TutorInscripciones() {
         )}
       </section>
 
-      {esTutor && <section aria-label="Solicitar una inscripción">
-      {cargandoTurnos ? (
-        <p role="status" className="text-gray-600">Cargando turnos...</p>
-      ) : turnos.length === 0 ? (
-        <p className="rounded-lg border border-gray-200 bg-gray-50 p-5 text-gray-600">
-          No hay turnos con inscripción abierta en este momento.
-        </p>
-      ) : (
-        <section aria-label="Turnos disponibles" className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {turnos.map((turno) => (
-            <button
-              key={turno.id}
-              type="button"
-              onClick={() => {
-                setTurnoSeleccionado(turno);
-                setInscripcion(null);
-                setError("");
-              }}
-              className={`rounded-xl border bg-white p-5 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-emerald-500 hover:shadow-md ${
-                turnoSeleccionado?.id === turno.id
-                  ? "border-emerald-600 ring-2 ring-emerald-100"
-                  : "border-gray-200"
-              }`}
-            >
-              <span className="text-sm font-medium text-emerald-700">Turno #{turno.id}</span>
-              <h2 className="mt-1 text-lg font-semibold text-gray-900">{turno.nombre}</h2>
-              <dl className="mt-4 space-y-2 text-sm text-gray-600">
-                <div className="flex justify-between gap-3">
-                  <dt>Sede</dt>
-                  <dd className="font-medium text-gray-900">{turno.sedeId}</dd>
-                </div>
-                <div className="flex justify-between gap-3">
-                  <dt>Fechas</dt>
-                  <dd className="text-right font-medium text-gray-900">
-                    {mostrarFecha(turno.fechaInicio)} – {mostrarFecha(turno.fechaFin)}
-                  </dd>
-                </div>
-                <div className="flex justify-between gap-3">
-                  <dt>Cupos disponibles</dt>
-                  <dd className="font-medium text-gray-900">
-                    {turno.disponibles} / {turno.cupoTotal}
-                  </dd>
-                </div>
-              </dl>
-            </button>
-          ))}
-        </section>
-      )}
+      {esTutor && (
+        <section aria-label="Solicitar una inscripción">
+          <div className="mb-4">
+            <h2 className="text-xl font-semibold text-gray-900">Turnos con inscripción abierta</h2>
+            <p className="mt-1 text-sm text-gray-600">Elegí una actividad para iniciar una inscripción.</p>
+          </div>
+          {cargandoTurnos ? (
+            <p role="status" className="text-gray-600">Cargando turnos...</p>
+          ) : turnos.length === 0 ? (
+            <p className="rounded-lg border border-gray-200 bg-gray-50 p-5 text-gray-600">
+              No hay turnos con inscripción abierta en este momento.
+            </p>
+          ) : (
+            <section aria-label="Turnos disponibles" className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {turnos.map((turno) => (
+                <button
+                  key={turno.id}
+                  type="button"
+                  onClick={() => {
+                    setTurnoSeleccionado(turno);
+                    setInscripcion(null);
+                    setError("");
+                  }}
+                  className={`rounded-xl border bg-white p-5 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-emerald-500 hover:shadow-md ${
+                    turnoSeleccionado?.id === turno.id
+                      ? "border-emerald-600 ring-2 ring-emerald-100"
+                      : "border-gray-200"
+                  }`}
+                >
+                  <span className="text-sm font-medium text-emerald-700">Turno #{turno.id}</span>
+                  <h2 className="mt-1 text-lg font-semibold text-gray-900">{turno.nombre}</h2>
+                  <dl className="mt-4 space-y-2 text-sm text-gray-600">
+                    <div className="flex justify-between gap-3">
+                      <dt>Sede</dt>
+                      <dd className="font-medium text-gray-900">{turno.sedeId}</dd>
+                    </div>
+                    <div className="flex justify-between gap-3">
+                      <dt>Fechas</dt>
+                      <dd className="text-right font-medium text-gray-900">
+                        {mostrarFecha(turno.fechaInicio)} – {mostrarFecha(turno.fechaFin)}
+                      </dd>
+                    </div>
+                    <div className="flex justify-between gap-3">
+                      <dt>Cupos disponibles</dt>
+                      <dd className="font-medium text-gray-900">
+                        {turno.disponibles} / {turno.cupoTotal}
+                      </dd>
+                    </div>
+                  </dl>
+                </button>
+              ))}
+            </section>
+          )}
 
       {turnoSeleccionado && !inscripcion && (
         <section className="mt-10 rounded-xl border border-gray-200 p-6">
@@ -645,7 +899,8 @@ export default function TutorInscripciones() {
           )}
         </section>
       )}
-      </section>}
+        </section>
+      )}
     </main>
   );
 }

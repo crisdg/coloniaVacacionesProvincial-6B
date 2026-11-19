@@ -55,8 +55,8 @@ function salir() {
   sessionStorage.removeItem('colonia.pkce_verifier');
   sessionStorage.removeItem('colonia.pkce_state');
   if (!idToken) {
+    informarSesion();
     mostrarSesion();
-    $('#resultado').textContent = 'Sesión cerrada en esta página.';
     return;
   }
   const url = new URL(`${ISSUER}/protocol/openid-connect/logout`);
@@ -97,38 +97,20 @@ async function completarLogin() {
   history.replaceState({}, '', REDIRECT_URI);
 }
 
-async function llamar(path, options = {}) {
-  const headers = { ...(options.headers ?? {}) };
-  if (token()) headers.Authorization = `Bearer ${token()}`;
-  
-  const response = await fetch(`http://localhost:8000${path}`, { ...options, headers });
-  const texto = await response.text();
-  let cuerpo = texto;
-  try { cuerpo = JSON.stringify(JSON.parse(texto), null, 2); } catch { /* texto plano */ }
-  
-  const resBox = $('#resultado');
-  resBox.style.display = 'block';
-  resBox.className = response.ok 
-    ? "mt-4 rounded-xl border border-emerald-200 bg-emerald-50/50 p-4 font-mono text-xs text-emerald-900 overflow-x-auto shadow-sm"
-    : "mt-4 rounded-xl border border-red-200 bg-red-50 p-4 font-mono text-xs text-red-900 overflow-x-auto shadow-sm";
-  
-  resBox.textContent = `Status: ${response.status} ${response.statusText}\n\n${cuerpo}`;
-  return response;
+function mostrarError(mensaje) {
+  const elemento = $('#auth-message');
+  elemento.hidden = !mensaje;
+  elemento.textContent = mensaje;
 }
 
 async function mostrarSesion() {
   const ingresarBtn = $('#ingresar');
   const salirBtn = $('#salir');
-  const acciones = $('#acciones');
-  const crearTurnoBtn = $('#crear');
-  const resBox = $('#resultado');
 
   if (!token()) {
-    $('#sesion').textContent = 'Sin sesión. Ingresá con ana (administrador) o beto (tutor).';
+    $('#sesion').textContent = 'Ingresá para acceder a tu espacio.';
     if (ingresarBtn) ingresarBtn.hidden = false;
     if (salirBtn) salirBtn.hidden = true;
-    if (acciones) acciones.hidden = true;
-    if (resBox) resBox.style.display = 'block';
     informarSesion();
     return;
   }
@@ -139,78 +121,44 @@ async function mostrarSesion() {
   const response = await fetch('http://localhost:8000/yo', { headers: { Authorization: `Bearer ${token()}` } });
   if (response.status === 401) {
     sessionStorage.removeItem(TOKEN_KEY);
-    mostrarSesion();
+    informarSesion();
+    await mostrarSesion();
     return;
   }
+  if (!response.ok) {
+    informarSesion();
+    $('#sesion').textContent = 'No se pudo cargar tu espacio en este momento.';
+    mostrarError('Intentá nuevamente más tarde.');
+    return;
+  }
+
   const yo = await response.json();
-  const roles = response.ok ? yo.roles ?? [] : [];
+  const roles = yo.roles ?? [];
   informarSesion(roles);
-  
-  const esAdmin = roles.includes('administrador');
-  const esTutor = roles.includes('tutor');
-
-  // Usamos .hidden en lugar de style.display para respetar el atributo HTML
-  if (acciones) {
-    acciones.hidden = !esAdmin; // Visible solo para admin
-  }
-  
-  if (crearTurnoBtn) {
-    crearTurnoBtn.hidden = !esAdmin; // Visible solo para admin
-  }
-  
-  if (resBox && esTutor && !esAdmin) {
-    resBox.style.display = 'none'; // Oculto para tutor
-  } else if (resBox) {
-    resBox.style.display = 'block';
-  }
-
-  $('#sesion').textContent = response.ok
-    ? `Sesión de ${yo.usuario}. Roles: ${roles.filter((rol) => rol === 'tutor' || rol === 'administrador').join(', ') || 'ninguno de colonia'}.`
-    : 'No se pudo leer la sesión.';
-}
-
-async function listarTurnos() {
-  await llamar('/turnos');
-}
-
-async function crearTurno() {
-  const dentroDeDias = (dias) => new Date(Date.now() + dias * 86_400_000);
-  await llamar('/turnos', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      convocatoriaId: 'verano-2027',
-      sedeId: 1,
-      nombre: 'Turno mañana',
-      fechaInicio: dentroDeDias(30).toISOString().slice(0, 10),
-      fechaFin: dentroDeDias(50).toISOString().slice(0, 10),
-      inscripcionAbreEn: new Date().toISOString(),
-      inscripcionCierraEn: dentroDeDias(20).toISOString(),
-      cupoTotal: 30,
-    }),
-  });
+  mostrarError('');
+  $('#sesion').textContent = `Hola, ${yo.usuario}.`;
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
-  $('#ingresar').addEventListener('click', () => { ingresar().catch((error) => { $('#resultado').textContent = error.message; }); });
+  $('#ingresar').addEventListener('click', () => {
+    ingresar().catch(() => mostrarError('No se pudo iniciar sesión. Intentá nuevamente.'));
+  });
   $('#salir').addEventListener('click', salir);
-  $('#listar').addEventListener('click', () => { listarTurnos().catch((error) => { $('#resultado').textContent = error.message; }); });
-  $('#crear').addEventListener('click', () => { crearTurno().catch((error) => { $('#resultado').textContent = error.message; }); });
-
-  const resBox = $('#resultado');
-  if (resBox) resBox.style.display = 'none';
 
   try {
     await completarLogin();
   } catch (error) {
-    $('#resultado').style.display = 'block';
-    $('#resultado').textContent = error.message;
+    mostrarError('No se pudo completar el inicio de sesión. Intentá nuevamente.');
     history.replaceState({}, '', REDIRECT_URI);
   }
-  await mostrarSesion();
+  try {
+    await mostrarSesion();
+  } catch {
+    mostrarError('No se pudo cargar tu espacio en este momento.');
+  }
 
   fetch('/api/health')
     .then((response) => { if (!response.ok) throw new Error(); return response.json(); })
-    .then(() => { $('#estado').textContent = 'API y base de datos disponibles.'; })
-    .catch(() => { $('#estado').textContent = 'No se pudo comprobar la disponibilidad del sistema.'; });
+    .then(() => { $('#estado').textContent = 'El sistema está disponible.'; })
+    .catch(() => { $('#estado').textContent = 'El sistema no está disponible en este momento.'; });
 });

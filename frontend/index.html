@@ -6,23 +6,22 @@
   <title>Colonia de Vacaciones Provincial</title>
 </head>
 <body>
-  <div class="mx-auto max-w-5xl px-4 py-8 text-gray-900">
-    <section class="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm sm:p-8">
-      <p class="text-sm font-semibold uppercase tracking-wide text-emerald-700">Proyecto · Arquitectura de Software 1</p>
-      <h1 class="mt-2 text-3xl font-bold">Colonia de Vacaciones Provincial</h1>
-      <p class="mt-2 text-gray-600">El ingreso usa Keycloak con Authorization Code y PKCE. El cliente <code>frontend</code> vuelve a <code>http://localhost:3001/</code>.</p>
-      <p id="estado" role="status" class="mt-4 rounded-lg bg-emerald-50 p-4 text-emerald-900">Comprobando conexión con el sistema…</p>
-      <p id="sesion" class="mt-3 rounded-lg bg-gray-50 p-4 text-gray-700">Sin sesión.</p>
-      <div class="my-4 flex flex-wrap gap-2">
-        <button id="ingresar" type="button" class="rounded-lg bg-emerald-700 px-4 py-2 font-semibold text-white hover:bg-emerald-800">Ingresar</button>
-        <button id="salir" type="button" hidden class="rounded-lg border border-gray-300 px-4 py-2 font-semibold text-gray-700 hover:bg-gray-50">Salir</button>
+  <div class="mx-auto max-w-5xl px-4 py-8 text-gray-900 sm:py-12">
+    <section class="overflow-hidden rounded-3xl border border-emerald-100 bg-white shadow-sm">
+      <div class="bg-gradient-to-br from-emerald-50 via-white to-gray-50 p-6 sm:p-10">
+        <p class="text-sm font-semibold uppercase tracking-wide text-emerald-700">Bienvenidos</p>
+        <h1 class="mt-2 text-3xl font-bold tracking-tight text-gray-950 sm:text-4xl">Colonia de Vacaciones Provincial</h1>
+        <p class="mt-3 max-w-2xl text-gray-600">Un espacio para organizar los turnos y acompañar las inscripciones de la colonia.</p>
+        <div class="mt-6 flex flex-wrap gap-3">
+          <button id="ingresar" type="button" class="rounded-lg bg-emerald-700 px-5 py-2.5 font-semibold text-white shadow-sm transition hover:bg-emerald-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2">Ingresar</button>
+          <button id="salir" type="button" hidden class="rounded-lg border border-gray-300 bg-white px-5 py-2.5 font-semibold text-gray-700 transition hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2">Cerrar sesión</button>
+        </div>
+        <p id="auth-message" role="alert" hidden class="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800"></p>
       </div>
-      <div id="acciones" class="my-4 flex flex-wrap gap-2" hidden>
-        <button id="listar" type="button" class="rounded-lg bg-emerald-700 px-4 py-2 font-semibold text-white hover:bg-emerald-800">Listar turnos</button>
-        <button id="crear" type="button" class="rounded-lg border border-gray-300 px-4 py-2 font-semibold text-gray-700 hover:bg-gray-50">Crear turno</button>
+      <div class="flex flex-col gap-3 border-t border-gray-100 px-6 py-5 sm:flex-row sm:items-center sm:justify-between sm:px-10">
+        <p id="sesion" class="font-medium text-gray-700">Ingresá para acceder a tu espacio.</p>
+        <p id="estado" role="status" class="text-sm text-gray-500">Conectando con el sistema…</p>
       </div>
-      <pre id="resultado" class="overflow-x-auto whitespace-pre-wrap rounded-lg bg-gray-50 p-4 font-mono text-sm text-gray-700">Elegí una acción después de ingresar. Listar turnos responde 200 para tutor y administrador. Crear turno responde 201 para el administrador y 403 para el tutor.</pre>
-      <p class="mt-4"><a class="font-medium text-emerald-700 underline" href="/api/health">Consultar estado del sistema</a></p>
     </section>
   </div>
   <div id="tutor-root"></div>
