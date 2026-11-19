@@ -8,6 +8,8 @@ La fuente es el documento **Colonia de Vacaciones Provincial (Escenario 6B) (2).
 
 Los [escenarios de calidad y el análisis ATAM](escenarios-de-calidad-y-atam.md) reúnen E1 a E5 y la evaluación de E1 desarrollada en el documento fuente.
 
+Para instalar y ejecutar el sistema, consultar el [README principal](../README.md). El detalle de funcionamiento está en la [referencia técnica](implementacion.md), y los comandos de verificación en la [guía de pruebas](pruebas.md).
+
 - [ADR-001: Estilo arquitectónico monolito modular](adr/ADR-001-monolito-modular.md) — Aceptado.
 - [ADR-002: Ingestión asincrónica mediante cola de mensajes](adr/ADR-002-ingestion-asincronica.md) — Aceptado.
 - [ADR-002 (opción): Cola de espera virtual en la capa de borde](adr/ADR-002-opcion-cola-de-espera-virtual.md) — Rechazado.
