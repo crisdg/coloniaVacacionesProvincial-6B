@@ -23,13 +23,18 @@ const BASE_URL = __ENV.BASE_URL || 'http://host.docker.internal:3001/api';
 const TOKEN = __ENV.TOKEN;
 const TURNO_ID = Number(__ENV.TURNO_ID || 2);
 
+// Semilla por ejecución de k6 para evitar chocar con DNIs de corridas anteriores
+const RUN_SEED = Math.floor((Date.now() % 10000) / 10); // 0..999
+
 export default function () {
   if (!TOKEN) {
     throw new Error('Falta la variable de entorno TOKEN (JWT de un tutor como beto)');
   }
 
-  // DNI único de 8 dígitos por VU e iteración
-  const dniNum = 40000000 + (__VU * 100000) + __ITER;
+  // DNI único de 8 dígitos dentro del rango 40000000..49999999
+  // RUN_SEED (0..999) * 10000 + __VU * 100 + __ITER (máx ~9999999)
+  const sufijoUnico = (RUN_SEED * 10000) + (__VU * 100) + __ITER;
+  const dniNum = 40000000 + sufijoUnico;
   const documento = String(dniNum);
 
   // Clave de idempotencia única por operación lógica
